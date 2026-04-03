@@ -155,10 +155,15 @@ pub(crate) async fn queue_detail(
     let page = params.page.max(1);
     let opts = list_opts(page);
 
-    let total = state
-        .storage
-        .enqueued_count(RawQueue(queue_key.clone()))
-        .await?;
+    let stats = state.storage.stats().await?;
+    let queue_stats = stats.queues.iter().find(|q| q.key == queue_key).cloned();
+    let total = queue_stats.as_ref().map_or(0, |q| q.enqueued);
+    let busy = stats
+        .processing
+        .iter()
+        .filter(|p| p.job_envelope.queue == queue_key)
+        .count();
+
     let mut jobs = state
         .storage
         .list_queue_jobs(RawQueue(queue_key.clone()), &opts)
@@ -171,6 +176,8 @@ pub(crate) async fn queue_detail(
         base_path: state.base_path,
         active_tab: "/queues",
         queue_key,
+        queue_stats,
+        busy,
         jobs,
         page,
         total,
