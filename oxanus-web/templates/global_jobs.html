@@ -155,9 +155,8 @@
             'Error: ' + btn.dataset.error
         ].join('\n');
         navigator.clipboard.writeText(info).then(function() {
-            var orig = btn.textContent;
             btn.textContent = 'Copied!';
-            setTimeout(function() { btn.textContent = orig; }, 1500);
+            setTimeout(function() { btn.textContent = 'Copy Error Info'; }, 1500);
         }, function() {
             btn.textContent = 'Copy failed';
             setTimeout(function() { btn.textContent = 'Copy Error Info'; }, 1500);
