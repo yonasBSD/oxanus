@@ -121,7 +121,7 @@ where
     args = %envelope.job.args,
     retries = envelope.meta.retries,
     latency_ms = envelope.meta.latency_millis(),
-    success,
+    success = false,
 )))]
 async fn process<ET>(
     worker: &BoxedProcessable<ET>,

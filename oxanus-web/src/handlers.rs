@@ -55,7 +55,7 @@ pub(crate) async fn queues_list(
     Ok(QueuesTemplate {
         base_path: state.base_path,
         active_tab: "/queues",
-        queues: stats.queues,
+        stats,
         concurrency_map: state.concurrency_map,
         sort: sort.to_string(),
         dir: dir.to_string(),
@@ -155,10 +155,35 @@ pub(crate) async fn queue_detail(
     let page = params.page.max(1);
     let opts = list_opts(page);
 
-    let total = state
-        .storage
-        .enqueued_count(RawQueue(queue_key.clone()))
-        .await?;
+    let stats = state.storage.stats().await?;
+    let queue_stats = stats
+        .queues
+        .iter()
+        .find(|q| q.key == queue_key)
+        .cloned()
+        .or_else(|| {
+            // For dynamic sub-queues (prefix#suffix), look inside parent's sub-queues
+            let (prefix, suffix) = queue_key.split_once('#')?;
+            let parent = stats.queues.iter().find(|q| q.key == prefix)?;
+            let dq = parent.queues.iter().find(|dq| dq.suffix == suffix)?;
+            Some(oxanus::QueueStats {
+                key: queue_key.clone(),
+                enqueued: dq.enqueued,
+                processed: dq.processed,
+                succeeded: dq.succeeded,
+                panicked: dq.panicked,
+                failed: dq.failed,
+                latency_s: dq.latency_s,
+                queues: Vec::new(),
+            })
+        });
+    let total = queue_stats.as_ref().map_or(0, |q| q.enqueued);
+    let busy = stats
+        .processing
+        .iter()
+        .filter(|p| p.job_envelope.queue == queue_key)
+        .count();
+
     let mut jobs = state
         .storage
         .list_queue_jobs(RawQueue(queue_key.clone()), &opts)
@@ -171,6 +196,8 @@ pub(crate) async fn queue_detail(
         base_path: state.base_path,
         active_tab: "/queues",
         queue_key,
+        queue_stats,
+        busy,
         jobs,
         page,
         total,

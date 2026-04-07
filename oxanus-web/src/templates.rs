@@ -79,7 +79,7 @@ impl BusyTemplate {
 pub(crate) struct QueuesTemplate {
     pub base_path: String,
     pub active_tab: &'static str,
-    pub queues: Vec<oxanus::QueueStats>,
+    pub stats: oxanus::Stats,
     pub concurrency_map: HashMap<String, usize>,
     pub sort: String,
     pub dir: String,
@@ -151,6 +151,8 @@ pub(crate) struct QueueDetailTemplate {
     pub base_path: String,
     pub active_tab: &'static str,
     pub queue_key: String,
+    pub queue_stats: Option<oxanus::QueueStats>,
+    pub busy: usize,
     pub jobs: Vec<oxanus::JobEnvelope>,
     pub page: usize,
     pub total: usize,

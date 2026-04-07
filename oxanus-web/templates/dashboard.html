@@ -8,43 +8,14 @@
 
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="max-w-[88rem] mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div class="mb-6">
             <h1 class="text-2xl font-bold tracking-tight">Oxanus Dashboard</h1>
         </div>
 
         {% include "_tabs.html" %}
 
-        <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-4 mb-10">
-            <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Processed</div>
-                <div class="text-2xl font-semibold text-green-400">{{ stats.global.processed|format_number_i64 }}</div>
-            </div>
-            <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Failed</div>
-                <div class="text-2xl font-semibold text-red-400">{{ stats.global.failed|format_number_i64 }}</div>
-            </div>
-            <a href="{{ base_path }}/busy" class="bg-gray-900 rounded-lg p-4 border border-gray-800 hover:border-gray-600 transition-colors block">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Busy</div>
-                <div class="text-2xl font-semibold text-purple-400">{{ stats.processing.len() }}</div>
-            </a>
-            <a href="{{ base_path }}/queues" class="bg-gray-900 rounded-lg p-4 border border-gray-800 hover:border-gray-600 transition-colors block">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Enqueued</div>
-                <div class="text-2xl font-semibold text-blue-400">{{ stats.global.enqueued|format_number }}</div>
-            </a>
-            <a href="{{ base_path }}/retries" class="bg-gray-900 rounded-lg p-4 border border-gray-800 hover:border-gray-600 transition-colors block">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Retries</div>
-                <div class="text-2xl font-semibold text-orange-400">{{ stats.global.retries|format_number }}</div>
-            </a>
-            <a href="{{ base_path }}/scheduled" class="bg-gray-900 rounded-lg p-4 border border-gray-800 hover:border-gray-600 transition-colors block">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Scheduled</div>
-                <div class="text-2xl font-semibold text-yellow-400">{{ stats.global.scheduled|format_number }}</div>
-            </a>
-            <a href="{{ base_path }}/dead" class="bg-gray-900 rounded-lg p-4 border border-gray-800 hover:border-gray-600 transition-colors block">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Dead</div>
-                <div class="text-2xl font-semibold text-red-400">{{ stats.global.dead|format_number }}</div>
-            </a>
-        </div>
+        {% include "_stats_cards.html" %}
 
         <section class="mb-10">
             <h2 class="text-lg font-semibold mb-4">Active Processes ({{ stats.processes.len() }})</h2>
@@ -107,6 +78,17 @@
                             <td class="py-3 pr-4 text-right text-blue-400">{{ queue.enqueued }}</td>
                             <td class="py-3 text-right text-purple-400">{{ queue.latency_s|format_latency }}</td>
                         </tr>
+                        {% for dq in &queue.queues %}
+                        {% if dq.enqueued > 0 %}
+                        <tr class="border-b border-gray-800/50 hover:bg-gray-900/50 text-gray-500">
+                            <td class="py-2 pr-4 pl-10 font-mono text-xs">&#8627; <a href="{{ base_path }}/queues/{{ queue.key }}%23{{ dq.suffix|urlencode }}" class="text-blue-400 hover:text-blue-300 hover:underline">{{ dq.suffix }}</a></td>
+                            <td class="py-2 pr-4 text-right text-xs text-gray-500">{{ self.concurrency_for(&queue.key) }}</td>
+                            <td class="py-2 pr-4 text-right text-xs text-purple-400"></td>
+                            <td class="py-2 pr-4 text-right text-xs text-blue-400">{{ dq.enqueued }}</td>
+                            <td class="py-2 text-right text-xs text-purple-400">{{ dq.latency_s|format_latency }}</td>
+                        </tr>
+                        {% endif %}
+                        {% endfor %}
                         {% endfor %}
                     </tbody>
                 </table>

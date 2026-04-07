@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.7]
+
+### Added
+- Add stat cards to queues tab
+
+### Fixed
+- Retry cron job enqueue on transient Redis failure
+- Handle transient Redis errors without full shutdown
+
+## [0.9.6]
+
+### Fixed
+- Show stats tiles on dynamic sub-queue detail pages
+
+## [0.9.5]
+
+### Added
+- Make queue name clickable in job cards linking to queue detail page
+- Show dynamic child queues in Active Queues sections on dashboard and busy pages
+
+## [0.9.4]
+
+### Added
+- Queue stats tiles to queue detail page
+- Add latency tile to overview dashboard
+
+## [0.9.3]
+
+### Added
+- Truncate long errors and add Copy Error Info button in web dashboard
+
+### Fixed
+- Fix panic instrumentation: trace was missing `success` value instead of recording `false`
+
 ## [0.9.2]
 
 ### Added
