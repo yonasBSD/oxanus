@@ -19,7 +19,6 @@ struct WorkerContext {}
 struct ResumableTestWorkerJob {}
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = ResumableTestWorkerJob)]
 #[oxanus(max_retries = 10, retry_delay = 3)]
 struct ResumableTestWorker;
 

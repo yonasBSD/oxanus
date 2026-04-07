@@ -14,7 +14,6 @@ struct WorkerContext {}
 struct TestWorkerJob {}
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = TestWorkerJob)]
 #[oxanus(context = WorkerContext)]
 #[oxanus(resurrect = false)]
 #[oxanus(cron(schedule = "*/5 * * * * *", queue = QueueOne))]

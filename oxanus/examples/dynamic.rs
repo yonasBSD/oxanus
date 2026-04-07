@@ -14,7 +14,6 @@ struct WorkerContext {}
 struct Worker2SecJob {}
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = Worker2SecJob)]
 struct Worker2Sec;
 
 impl Worker2Sec {

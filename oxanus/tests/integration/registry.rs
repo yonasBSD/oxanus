@@ -16,7 +16,6 @@ pub struct WorkerCounterJob {
 }
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = WorkerCounterJob)]
 pub struct WorkerCounter {
     ctx: WorkerContext,
 }
@@ -37,7 +36,6 @@ impl WorkerCounter {
 pub struct CronWorkerCounterJob {}
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = CronWorkerCounterJob)]
 #[oxanus(cron(schedule = "* * * * * *", queue = QueueTwo))]
 pub struct CronWorkerCounter {
     ctx: WorkerContext,

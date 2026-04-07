@@ -102,7 +102,7 @@ pub type BoxedProcessable<ET> = Box<dyn Processable<Error = ET>>;
 
 pub(crate) struct BoundJob<W, A> {
     pub worker: W,
-    pub args: A,
+    pub job: A,
 }
 
 #[async_trait::async_trait]
@@ -114,7 +114,7 @@ where
     type Error = W::Error;
 
     async fn process(&self, ctx: &JobContext) -> Result<(), Self::Error> {
-        self.worker.process(&self.args, ctx).await
+        self.worker.process(&self.job, ctx).await
     }
 
     fn max_retries(&self) -> u32 {
@@ -148,29 +148,28 @@ mod tests {
     #[tokio::test]
     async fn test_define_worker_with_macro() {
         #[derive(Debug, Serialize, Deserialize)]
-        struct TestJob {}
+        struct TestWorkerJob {}
 
         #[derive(oxanus::Worker)]
-        #[oxanus(args = TestJob)]
+
         struct TestWorker;
 
         impl TestWorker {
             async fn process(
                 &self,
-                _job: &TestJob,
+                _job: &TestWorkerJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
             }
         }
 
-        assert_eq!(oxanus::Worker::<TestJob>::max_retries(&TestWorker), 2);
+        assert_eq!(oxanus::Worker::<TestWorkerJob>::max_retries(&TestWorker), 2);
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct TestJob2 {}
+        struct TestWorkerCustomErrorJob {}
 
         #[derive(oxanus::Worker)]
-        #[oxanus(args = TestJob2)]
         #[oxanus(error = std::fmt::Error, registry = ComponentRegistryFmt)]
         #[oxanus(max_retries = 3, retry_delay = 10)]
         #[oxanus(on_conflict = Replace)]
@@ -179,7 +178,7 @@ mod tests {
         impl TestWorkerCustomError {
             async fn process(
                 &self,
-                _job: &TestJob2,
+                _job: &TestWorkerCustomErrorJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), std::fmt::Error> {
                 use std::fmt::Write;
@@ -189,30 +188,32 @@ mod tests {
         }
 
         assert_eq!(
-            oxanus::Worker::<TestJob2>::max_retries(&TestWorkerCustomError),
+            oxanus::Worker::<TestWorkerCustomErrorJob>::max_retries(&TestWorkerCustomError),
             3
         );
         assert_eq!(
-            oxanus::Worker::<TestJob2>::retry_delay(&TestWorkerCustomError, 1),
+            oxanus::Worker::<TestWorkerCustomErrorJob>::retry_delay(&TestWorkerCustomError, 1),
             10
         );
-        assert_eq!(TestJob2 {}.on_conflict(), JobConflictStrategy::Replace);
+        assert_eq!(
+            TestWorkerCustomErrorJob {}.on_conflict(),
+            JobConflictStrategy::Replace
+        );
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct UniqueJob {
+        struct TestWorkerUniqueIdJob {
             id: i32,
             _1: i32,
         }
 
         #[derive(oxanus::Worker)]
-        #[oxanus(args = UniqueJob)]
         #[oxanus(unique_id = "test_worker_{id}")]
         struct TestWorkerUniqueId;
 
         impl TestWorkerUniqueId {
             async fn process(
                 &self,
-                _job: &UniqueJob,
+                _job: &TestWorkerUniqueIdJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
@@ -220,15 +221,15 @@ mod tests {
         }
 
         assert_eq!(
-            oxanus::Worker::<UniqueJob>::max_retries(&TestWorkerUniqueId),
+            oxanus::Worker::<TestWorkerUniqueIdJob>::max_retries(&TestWorkerUniqueId),
             2
         );
         assert_eq!(
-            oxanus::Job::unique_id(&UniqueJob { id: 1, _1: 0 }),
+            oxanus::Job::unique_id(&TestWorkerUniqueIdJob { id: 1, _1: 0 }),
             Some("test_worker_1".to_string())
         );
         assert_eq!(
-            oxanus::Job::unique_id(&UniqueJob { id: 12, _1: 0 }),
+            oxanus::Job::unique_id(&TestWorkerUniqueIdJob { id: 12, _1: 0 }),
             Some("test_worker_12".to_string())
         );
 
@@ -238,20 +239,19 @@ mod tests {
         }
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct NestedUniqueJob {
+        struct TestWorkerNestedUniqueIdJob {
             id: i32,
             task: NestedTask,
         }
 
         #[derive(oxanus::Worker)]
-        #[oxanus(args = NestedUniqueJob)]
         #[oxanus(unique_id(fmt = "test_worker_{id}_{task}", id = self.id, task = self.task.name))]
         struct TestWorkerNestedUniqueId;
 
         impl TestWorkerNestedUniqueId {
             async fn process(
                 &self,
-                _job: &NestedUniqueJob,
+                _job: &TestWorkerNestedUniqueIdJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
@@ -259,7 +259,7 @@ mod tests {
         }
 
         assert_eq!(
-            oxanus::Job::unique_id(&NestedUniqueJob {
+            oxanus::Job::unique_id(&TestWorkerNestedUniqueIdJob {
                 id: 1,
                 task: NestedTask {
                     name: "task1".to_owned(),
@@ -268,7 +268,7 @@ mod tests {
             Some("test_worker_1_task1".to_string())
         );
         assert_eq!(
-            oxanus::Job::unique_id(&NestedUniqueJob {
+            oxanus::Job::unique_id(&TestWorkerNestedUniqueIdJob {
                 id: 2,
                 task: NestedTask {
                     name: "task2".to_owned(),
@@ -278,19 +278,18 @@ mod tests {
         );
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct CustomUniqueJob {
+        struct TestWorkerCustomUniqueIdJob {
             id: i32,
             task: NestedTask,
         }
 
-        impl CustomUniqueJob {
+        impl TestWorkerCustomUniqueIdJob {
             fn unique_id(&self) -> Option<String> {
                 Some(format!("worker_id_{}_task_{}", self.id, self.task.name))
             }
         }
 
         #[derive(oxanus::Worker)]
-        #[oxanus(args = CustomUniqueJob)]
         #[oxanus(unique_id = Self::unique_id)]
         #[oxanus(retry_delay = Self::retry_delay)]
         #[oxanus(max_retries = Self::max_retries)]
@@ -299,7 +298,7 @@ mod tests {
         impl TestWorkerCustomUniqueId {
             async fn process(
                 &self,
-                _job: &CustomUniqueJob,
+                _job: &TestWorkerCustomUniqueIdJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
@@ -315,7 +314,7 @@ mod tests {
         }
 
         assert_eq!(
-            oxanus::Job::unique_id(&CustomUniqueJob {
+            oxanus::Job::unique_id(&TestWorkerCustomUniqueIdJob {
                 id: 1,
                 task: NestedTask {
                     name: "11".to_owned(),
@@ -323,7 +322,7 @@ mod tests {
             }),
             Some("worker_id_1_task_11".to_string())
         );
-        let job2 = CustomUniqueJob {
+        let job2 = TestWorkerCustomUniqueIdJob {
             id: 2,
             task: NestedTask {
                 name: "22".to_owned(),
@@ -335,14 +334,17 @@ mod tests {
         );
         let worker = TestWorkerCustomUniqueId;
         assert_eq!(
-            oxanus::Worker::<CustomUniqueJob>::retry_delay(&worker, 1),
+            oxanus::Worker::<TestWorkerCustomUniqueIdJob>::retry_delay(&worker, 1),
             2
         );
         assert_eq!(
-            oxanus::Worker::<CustomUniqueJob>::retry_delay(&worker, 2),
+            oxanus::Worker::<TestWorkerCustomUniqueIdJob>::retry_delay(&worker, 2),
             4
         );
-        assert_eq!(oxanus::Worker::<CustomUniqueJob>::max_retries(&worker), 9);
+        assert_eq!(
+            oxanus::Worker::<TestWorkerCustomUniqueIdJob>::max_retries(&worker),
+            9
+        );
     }
 
     #[tokio::test]
@@ -355,17 +357,16 @@ mod tests {
         struct DefaultQueue;
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct TestCronJob {}
+        struct TestCronWorkerJob {}
 
         #[derive(oxanus::Worker)]
-        #[oxanus(args = TestCronJob)]
         #[oxanus(cron(schedule = "*/1 * * * * *", queue = DefaultQueue))]
         struct TestCronWorker;
 
         impl TestCronWorker {
             async fn process(
                 &self,
-                _job: &TestCronJob,
+                _job: &TestCronWorkerJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
@@ -373,14 +374,14 @@ mod tests {
         }
 
         assert_eq!(
-            <TestCronWorker as oxanus::Worker<TestCronJob>>::cron_schedule(),
+            <TestCronWorker as oxanus::Worker<TestCronWorkerJob>>::cron_schedule(),
             Some("*/1 * * * * *".to_string())
         );
         assert_eq!(
-            <TestCronWorker as oxanus::Worker<TestCronJob>>::cron_queue_config(),
+            <TestCronWorker as oxanus::Worker<TestCronWorkerJob>>::cron_queue_config(),
             Some(DefaultQueue::to_config()),
         );
-        assert!(<TestCronJob as oxanus::Job>::should_resurrect());
+        assert!(<TestCronWorkerJob as oxanus::Job>::should_resurrect());
     }
 
     #[tokio::test]
@@ -389,42 +390,41 @@ mod tests {
         use std::io::Error as WorkerError;
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct NoResurrectJob {}
+        struct NoResurrectWorkerJob {}
 
         #[derive(oxanus::Worker)]
-        #[oxanus(args = NoResurrectJob)]
         #[oxanus(resurrect = false)]
         struct NoResurrectWorker;
 
         impl NoResurrectWorker {
             async fn process(
                 &self,
-                _job: &NoResurrectJob,
+                _job: &NoResurrectWorkerJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
             }
         }
 
-        assert!(!<NoResurrectJob as oxanus::Job>::should_resurrect());
+        assert!(!<NoResurrectWorkerJob as oxanus::Job>::should_resurrect());
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct DefaultResurrectJob {}
+        struct DefaultResurrectWorkerJob {}
 
         #[derive(oxanus::Worker)]
-        #[oxanus(args = DefaultResurrectJob)]
+
         struct DefaultResurrectWorker;
 
         impl DefaultResurrectWorker {
             async fn process(
                 &self,
-                _job: &DefaultResurrectJob,
+                _job: &DefaultResurrectWorkerJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
             }
         }
 
-        assert!(<DefaultResurrectJob as oxanus::Job>::should_resurrect());
+        assert!(<DefaultResurrectWorkerJob as oxanus::Job>::should_resurrect());
     }
 }

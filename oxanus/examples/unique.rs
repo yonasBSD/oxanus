@@ -16,7 +16,6 @@ struct Worker2SecJob {
 }
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = Worker2SecJob)]
 #[oxanus(unique_id = "worker2sec:{id}", on_conflict = Skip)]
 struct Worker2Sec;
 

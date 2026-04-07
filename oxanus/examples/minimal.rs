@@ -16,7 +16,6 @@ struct TestWorkerJob {
 }
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = TestWorkerJob)]
 struct TestWorker;
 
 impl TestWorker {

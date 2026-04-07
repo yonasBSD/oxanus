@@ -9,7 +9,7 @@ use syn::{
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(oxanus), supports(struct_any))]
 struct OxanusArgs {
-    args: Option<Path>,
+    job: Option<Path>,
     context: Option<Path>,
     error: Option<Path>,
     registry: Option<Path>,
@@ -190,12 +190,12 @@ pub fn expand_derive_worker(input: DeriveInput) -> TokenStream {
 
     let struct_ident = &input.ident;
 
-    let type_args = match &args.args {
+    let type_args = match &args.job {
         Some(path) => quote!(#path),
-        None => abort!(
-            input.ident,
-            "Worker must have #[oxanus(args = MyJob)] attribute specifying the job type"
-        ),
+        None => {
+            let job_ident = Ident::new(&format!("{struct_ident}Job"), struct_ident.span());
+            quote!(#job_ident)
+        }
     };
 
     let type_context = match &args.context {

@@ -14,7 +14,6 @@ struct WorkerContext {}
 struct WorkerInstantJob {}
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = WorkerInstantJob)]
 struct WorkerInstant;
 
 impl WorkerInstant {
@@ -31,7 +30,6 @@ impl WorkerInstant {
 struct WorkerInstant2Job {}
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = WorkerInstant2Job)]
 #[oxanus(throttle_cost = 2)]
 struct WorkerInstant2;
 

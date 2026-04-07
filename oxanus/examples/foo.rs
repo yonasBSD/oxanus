@@ -17,7 +17,6 @@ struct Worker1SecJob {
 }
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = Worker1SecJob)]
 struct Worker1Sec;
 
 impl Worker1Sec {
@@ -38,7 +37,6 @@ struct Worker2SecJob {
 }
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = Worker2SecJob)]
 struct Worker2Sec;
 
 impl Worker2Sec {
@@ -56,7 +54,6 @@ impl Worker2Sec {
 struct WorkerInstantJob {}
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = WorkerInstantJob)]
 struct WorkerInstant;
 
 impl WorkerInstant {
@@ -73,7 +70,6 @@ impl WorkerInstant {
 struct WorkerInstant2Job {}
 
 #[derive(oxanus::Worker)]
-#[oxanus(args = WorkerInstant2Job)]
 struct WorkerInstant2;
 
 impl WorkerInstant2 {

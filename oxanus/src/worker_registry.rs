@@ -44,9 +44,9 @@ where
     DT: Send + Sync + Clone + 'static,
     ET: std::error::Error + Send + Sync + 'static,
 {
-    let args: A = serde_json::from_value(value)?;
+    let job: A = serde_json::from_value(value)?;
     let worker = W::from_context(ctx);
-    Ok(Box::new(BoundJob { worker, args }))
+    Ok(Box::new(BoundJob { worker, job }))
 }
 
 impl<DT, ET> WorkerRegistry<DT, ET> {

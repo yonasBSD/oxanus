@@ -53,7 +53,6 @@ struct SendEmailJob {
 
 // Worker struct — holds processing logic (and optionally app context)
 #[derive(oxanus::Worker)]
-#[oxanus(args = SendEmailJob)]
 #[oxanus(unique_id = "send_email:{user_id}")]
 #[oxanus(max_retries = 3)]
 struct SendEmail {
@@ -69,7 +68,7 @@ impl SendEmail {
 ```
 
 Key points:
-- The `#[oxanus(args = ...)]` attribute on the worker derive is **required** — it tells the macro which struct holds the job data.
+- By convention, the job type defaults to `{WorkerName}Job` (e.g., `SendEmail` → `SendEmailJob`). Use `#[oxanus(job = CustomType)]` to override.
 - Job-specific attributes (`unique_id`, `on_conflict`, `resurrect`, `throttle_cost`) stay on `#[derive(oxanus::Worker)]` but generate impls on the **job** struct's `Job` trait.
 - Worker-specific attributes (`max_retries`, `retry_delay`, `cron`, `error`, `context`, `registry`) generate impls on the **worker** struct's `Worker<Args>` trait.
 - The process method signature changes from `process(&self, ctx: &Context<T>)` to `process(&self, job: &JobType, ctx: &JobContext)`.
@@ -81,17 +80,17 @@ The worker struct can be:
 **Unit struct** (no app context needed):
 ```rust
 #[derive(oxanus::Worker)]
-#[oxanus(args = MyJob)]
 struct MyWorker;
+// Assumes job type is `MyWorkerJob`
 ```
 
 **Single-field struct** (auto `FromContext` — field is cloned from app context):
 ```rust
 #[derive(oxanus::Worker)]
-#[oxanus(args = MyJob)]
 struct MyWorker {
     state: AppState,
 }
+// Assumes job type is `MyWorkerJob`
 ```
 
 For more complex cases, implement `FromContext` manually:
@@ -178,7 +177,7 @@ let config = oxanus::Config::new(&storage)
 ```rust
 // Cron schedule and queue are defined on the derive
 #[derive(oxanus::Worker)]
-#[oxanus(args = MyCronJob)]
+#[oxanus(job = MyCronJob)]
 #[oxanus(cron(schedule = "*/5 * * * * *", queue = MyQueue))]
 struct MyCronWorker;
 
