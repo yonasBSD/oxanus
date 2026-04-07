@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.7]
+
+### Added
+- Add stat cards to queues tab
+
+### Fixed
+- Retry cron job enqueue on transient Redis failure
+- Handle transient Redis errors without full shutdown
+
 ## [0.9.6]
 
 ### Fixed
