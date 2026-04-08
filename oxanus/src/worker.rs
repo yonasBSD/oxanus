@@ -33,11 +33,11 @@ pub trait Worker<Args: Send + Sync>: Send + Sync {
 
     async fn process(&self, job: &Args, ctx: &JobContext) -> Result<(), Self::Error>;
 
-    fn max_retries(&self) -> u32 {
+    fn max_retries(&self, _job: &Args) -> u32 {
         2
     }
 
-    fn retry_delay(&self, retries: u32) -> u64 {
+    fn retry_delay(&self, _job: &Args, retries: u32) -> u64 {
         // 0 -> 25 seconds
         // 1 -> 125 seconds
         // 2 -> 625 seconds
@@ -118,11 +118,11 @@ where
     }
 
     fn max_retries(&self) -> u32 {
-        self.worker.max_retries()
+        self.worker.max_retries(&self.job)
     }
 
     fn retry_delay(&self, retries: u32) -> u64 {
-        self.worker.retry_delay(retries)
+        self.worker.retry_delay(&self.job, retries)
     }
 }
 
@@ -164,7 +164,10 @@ mod tests {
             }
         }
 
-        assert_eq!(oxanus::Worker::<TestJob>::max_retries(&TestWorker), 2);
+        assert_eq!(
+            oxanus::Worker::<TestJob>::max_retries(&TestWorker, &TestJob {}),
+            2
+        );
 
         #[derive(Debug, Serialize, Deserialize)]
         struct TestWorkerCustomErrorJob {}
@@ -188,11 +191,18 @@ mod tests {
         }
 
         assert_eq!(
-            oxanus::Worker::<TestWorkerCustomErrorJob>::max_retries(&TestWorkerCustomError),
+            oxanus::Worker::<TestWorkerCustomErrorJob>::max_retries(
+                &TestWorkerCustomError,
+                &TestWorkerCustomErrorJob {}
+            ),
             3
         );
         assert_eq!(
-            oxanus::Worker::<TestWorkerCustomErrorJob>::retry_delay(&TestWorkerCustomError, 1),
+            oxanus::Worker::<TestWorkerCustomErrorJob>::retry_delay(
+                &TestWorkerCustomError,
+                &TestWorkerCustomErrorJob {},
+                1
+            ),
             10
         );
         assert_eq!(
@@ -221,7 +231,10 @@ mod tests {
         }
 
         assert_eq!(
-            oxanus::Worker::<TestWorkerUniqueIdJob>::max_retries(&TestWorkerUniqueId),
+            oxanus::Worker::<TestWorkerUniqueIdJob>::max_retries(
+                &TestWorkerUniqueId,
+                &TestWorkerUniqueIdJob { id: 0, _1: 0 }
+            ),
             2
         );
         assert_eq!(
@@ -304,11 +317,11 @@ mod tests {
                 Ok(())
             }
 
-            fn retry_delay(&self, retries: u32) -> u64 {
+            fn retry_delay(&self, _job: &TestWorkerCustomUniqueIdJob, retries: u32) -> u64 {
                 retries as u64 * 2
             }
 
-            fn max_retries(&self) -> u32 {
+            fn max_retries(&self, _job: &TestWorkerCustomUniqueIdJob) -> u32 {
                 9
             }
         }
@@ -334,15 +347,15 @@ mod tests {
         );
         let worker = TestWorkerCustomUniqueId;
         assert_eq!(
-            oxanus::Worker::<TestWorkerCustomUniqueIdJob>::retry_delay(&worker, 1),
+            oxanus::Worker::<TestWorkerCustomUniqueIdJob>::retry_delay(&worker, &job2, 1),
             2
         );
         assert_eq!(
-            oxanus::Worker::<TestWorkerCustomUniqueIdJob>::retry_delay(&worker, 2),
+            oxanus::Worker::<TestWorkerCustomUniqueIdJob>::retry_delay(&worker, &job2, 2),
             4
         );
         assert_eq!(
-            oxanus::Worker::<TestWorkerCustomUniqueIdJob>::max_retries(&worker),
+            oxanus::Worker::<TestWorkerCustomUniqueIdJob>::max_retries(&worker, &job2),
             9
         );
     }

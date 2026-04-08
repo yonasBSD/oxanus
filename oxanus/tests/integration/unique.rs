@@ -47,10 +47,10 @@ impl oxanus::Worker<WorkerUniqueSkipJob> for WorkerUniqueSkip {
         Ok(())
     }
 
-    fn retry_delay(&self, _retries: u32) -> u64 {
+    fn retry_delay(&self, _job: &WorkerUniqueSkipJob, _retries: u32) -> u64 {
         0
     }
-    fn max_retries(&self) -> u32 {
+    fn max_retries(&self, _job: &WorkerUniqueSkipJob) -> u32 {
         0
     }
 }
@@ -98,10 +98,10 @@ impl oxanus::Worker<WorkerUniqueReplaceJob> for WorkerUniqueReplace {
         Ok(())
     }
 
-    fn retry_delay(&self, _retries: u32) -> u64 {
+    fn retry_delay(&self, _job: &WorkerUniqueReplaceJob, _retries: u32) -> u64 {
         0
     }
-    fn max_retries(&self) -> u32 {
+    fn max_retries(&self, _job: &WorkerUniqueReplaceJob) -> u32 {
         0
     }
 }

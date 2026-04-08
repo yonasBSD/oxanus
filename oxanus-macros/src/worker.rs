@@ -231,12 +231,12 @@ fn expand_worker_impl(
     args: &OxanusArgs,
 ) -> TokenStream {
     let max_retries = match &args.max_retries {
-        Some(max_retries) => expand_max_retries(max_retries),
+        Some(max_retries) => expand_max_retries(max_retries, type_args),
         None => quote!(),
     };
 
     let retry_delay = match &args.retry_delay {
-        Some(retry_delay) => expand_retry_delay(retry_delay),
+        Some(retry_delay) => expand_retry_delay(retry_delay, type_args),
         None => quote!(),
     };
 
@@ -405,38 +405,38 @@ fn expand_resurrect(resurrect: Option<bool>) -> TokenStream {
     }
 }
 
-fn expand_max_retries(max_retries: &MaxRetries) -> TokenStream {
+fn expand_max_retries(max_retries: &MaxRetries, type_args: &TokenStream) -> TokenStream {
     match max_retries {
         MaxRetries::Value(value) => {
             quote! {
-                fn max_retries(&self) -> u32 {
+                fn max_retries(&self, _job: &#type_args) -> u32 {
                     #value
                 }
             }
         }
         MaxRetries::CustomFunc(func) => {
             quote! {
-                fn max_retries(&self) -> u32 {
-                    #func(self)
+                fn max_retries(&self, job: &#type_args) -> u32 {
+                    #func(self, job)
                 }
             }
         }
     }
 }
 
-fn expand_retry_delay(retry_delay: &RetryDelay) -> TokenStream {
+fn expand_retry_delay(retry_delay: &RetryDelay, type_args: &TokenStream) -> TokenStream {
     match retry_delay {
         RetryDelay::Value(value) => {
             quote! {
-                fn retry_delay(&self, _retries: u32) -> u64 {
+                fn retry_delay(&self, _job: &#type_args, _retries: u32) -> u64 {
                     #value
                 }
             }
         }
         RetryDelay::CustomFunc(func) => {
             quote! {
-                fn retry_delay(&self, retries: u32) -> u64 {
-                    #func(self, retries)
+                fn retry_delay(&self, job: &#type_args, retries: u32) -> u64 {
+                    #func(self, job, retries)
                 }
             }
         }

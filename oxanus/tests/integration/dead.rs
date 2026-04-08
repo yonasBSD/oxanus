@@ -34,10 +34,10 @@ impl oxanus::Worker<WorkerFailJob> for WorkerFail {
         ))
     }
 
-    fn retry_delay(&self, _retries: u32) -> u64 {
+    fn retry_delay(&self, _job: &WorkerFailJob, _retries: u32) -> u64 {
         0
     }
-    fn max_retries(&self) -> u32 {
+    fn max_retries(&self, _job: &WorkerFailJob) -> u32 {
         0
     }
 }

@@ -46,10 +46,10 @@ impl oxanus::Worker<WorkerRedisSetWithRetryJob> for WorkerRedisSetWithRetry {
         Err(WorkerError::Generic("Key not set".to_string()))
     }
 
-    fn retry_delay(&self, _retries: u32) -> u64 {
+    fn retry_delay(&self, _job: &WorkerRedisSetWithRetryJob, _retries: u32) -> u64 {
         0
     }
-    fn max_retries(&self) -> u32 {
+    fn max_retries(&self, _job: &WorkerRedisSetWithRetryJob) -> u32 {
         1
     }
 }

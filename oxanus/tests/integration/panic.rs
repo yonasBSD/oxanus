@@ -31,7 +31,7 @@ impl oxanus::Worker<WorkerPanicJob> for WorkerPanic {
         panic!("test panic");
     }
 
-    fn max_retries(&self) -> u32 {
+    fn max_retries(&self, _job: &WorkerPanicJob) -> u32 {
         0
     }
 }
