@@ -16,7 +16,7 @@ enum WorkerError {
 struct WorkerContext {}
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ResumableTestWorkerJob {}
+struct ResumableTestJob {}
 
 #[derive(oxanus::Worker)]
 #[oxanus(max_retries = 10, retry_delay = 3)]
@@ -25,7 +25,7 @@ struct ResumableTestWorker;
 impl ResumableTestWorker {
     async fn process(
         &self,
-        _job: &ResumableTestWorkerJob,
+        _job: &ResumableTestJob,
         ctx: &oxanus::JobContext,
     ) -> Result<(), WorkerError> {
         let progress = ctx.state.get::<i32>().await?;
@@ -59,7 +59,7 @@ pub async fn main() -> Result<(), oxanus::OxanusError> {
         .with_graceful_shutdown(tokio::signal::ctrl_c())
         .exit_when_processed(11);
 
-    storage.enqueue(QueueOne, ResumableTestWorkerJob {}).await?;
+    storage.enqueue(QueueOne, ResumableTestJob {}).await?;
 
     oxanus::run(config, ctx).await?;
 

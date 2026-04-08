@@ -12,7 +12,7 @@ enum WorkerError {
 struct WorkerContext {}
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TestWorkerJob {}
+struct TestJob {}
 
 #[derive(oxanus::Worker)]
 #[oxanus(registry = None)]
@@ -21,11 +21,7 @@ struct TestWorkerJob {}
 struct TestWorker;
 
 impl TestWorker {
-    async fn process(
-        &self,
-        _job: &TestWorkerJob,
-        _ctx: &oxanus::JobContext,
-    ) -> Result<(), WorkerError> {
+    async fn process(&self, _job: &TestJob, _ctx: &oxanus::JobContext) -> Result<(), WorkerError> {
         if rand::rng().random_bool(0.5) {
             Err(WorkerError::GenericError("foo".to_string()))
         } else {
@@ -48,7 +44,7 @@ pub async fn main() -> Result<(), oxanus::OxanusError> {
     let ctx = oxanus::ContextValue::new(WorkerContext {});
     let storage = oxanus::Storage::builder().build_from_env()?;
     let config = oxanus::Config::new(&storage)
-        .register_worker::<TestWorker, TestWorkerJob>()
+        .register_worker::<TestWorker, TestJob>()
         .with_graceful_shutdown(tokio::signal::ctrl_c());
 
     oxanus::run(config, ctx).await?;

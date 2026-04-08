@@ -9,7 +9,7 @@ All notable changes to this project will be documented in this file.
 - `FromContext` trait for injecting app state into workers (auto-derived for unit and single-field structs)
 - `JobContext` replaces generic `Context<T>`
 - `ContextValue::new(x)` replaces `Context::value(x)`
-- `#[oxanus(job = Type)]` attribute with `{WorkerName}Job` convention default
+- `#[oxanus(job = Type)]` attribute with `{Name}Job` convention default (strips `Worker` suffix)
 - Migration guide ([MIGRATION.md](MIGRATION.md))
 
 ### Changed

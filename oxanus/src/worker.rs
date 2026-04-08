@@ -148,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn test_define_worker_with_macro() {
         #[derive(Debug, Serialize, Deserialize)]
-        struct TestWorkerJob {}
+        struct TestJob {}
 
         #[derive(oxanus::Worker)]
 
@@ -157,14 +157,14 @@ mod tests {
         impl TestWorker {
             async fn process(
                 &self,
-                _job: &TestWorkerJob,
+                _job: &TestJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
             }
         }
 
-        assert_eq!(oxanus::Worker::<TestWorkerJob>::max_retries(&TestWorker), 2);
+        assert_eq!(oxanus::Worker::<TestJob>::max_retries(&TestWorker), 2);
 
         #[derive(Debug, Serialize, Deserialize)]
         struct TestWorkerCustomErrorJob {}
@@ -357,7 +357,7 @@ mod tests {
         struct DefaultQueue;
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct TestCronWorkerJob {}
+        struct TestCronJob {}
 
         #[derive(oxanus::Worker)]
         #[oxanus(cron(schedule = "*/1 * * * * *", queue = DefaultQueue))]
@@ -366,7 +366,7 @@ mod tests {
         impl TestCronWorker {
             async fn process(
                 &self,
-                _job: &TestCronWorkerJob,
+                _job: &TestCronJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
@@ -374,14 +374,14 @@ mod tests {
         }
 
         assert_eq!(
-            <TestCronWorker as oxanus::Worker<TestCronWorkerJob>>::cron_schedule(),
+            <TestCronWorker as oxanus::Worker<TestCronJob>>::cron_schedule(),
             Some("*/1 * * * * *".to_string())
         );
         assert_eq!(
-            <TestCronWorker as oxanus::Worker<TestCronWorkerJob>>::cron_queue_config(),
+            <TestCronWorker as oxanus::Worker<TestCronJob>>::cron_queue_config(),
             Some(DefaultQueue::to_config()),
         );
-        assert!(<TestCronWorkerJob as oxanus::Job>::should_resurrect());
+        assert!(<TestCronJob as oxanus::Job>::should_resurrect());
     }
 
     #[tokio::test]
@@ -390,7 +390,7 @@ mod tests {
         use std::io::Error as WorkerError;
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct NoResurrectWorkerJob {}
+        struct NoResurrectJob {}
 
         #[derive(oxanus::Worker)]
         #[oxanus(resurrect = false)]
@@ -399,17 +399,17 @@ mod tests {
         impl NoResurrectWorker {
             async fn process(
                 &self,
-                _job: &NoResurrectWorkerJob,
+                _job: &NoResurrectJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
             }
         }
 
-        assert!(!<NoResurrectWorkerJob as oxanus::Job>::should_resurrect());
+        assert!(!<NoResurrectJob as oxanus::Job>::should_resurrect());
 
         #[derive(Debug, Serialize, Deserialize)]
-        struct DefaultResurrectWorkerJob {}
+        struct DefaultResurrectJob {}
 
         #[derive(oxanus::Worker)]
 
@@ -418,13 +418,13 @@ mod tests {
         impl DefaultResurrectWorker {
             async fn process(
                 &self,
-                _job: &DefaultResurrectWorkerJob,
+                _job: &DefaultResurrectJob,
                 _ctx: &oxanus::JobContext,
             ) -> Result<(), WorkerError> {
                 Ok(())
             }
         }
 
-        assert!(<DefaultResurrectWorkerJob as oxanus::Job>::should_resurrect());
+        assert!(<DefaultResurrectJob as oxanus::Job>::should_resurrect());
     }
 }

@@ -68,7 +68,7 @@ impl SendEmail {
 ```
 
 Key points:
-- By convention, the job type defaults to `{WorkerName}Job` (e.g., `SendEmail` → `SendEmailJob`). Use `#[oxanus(job = CustomType)]` to override.
+- By convention, the job type defaults to `{Name}Job` — stripping a `Worker` suffix if present (e.g., `SendEmailWorker` → `SendEmailJob`). Use `#[oxanus(job = CustomType)]` to override.
 - Job-specific attributes (`unique_id`, `on_conflict`, `resurrect`, `throttle_cost`) stay on `#[derive(oxanus::Worker)]` but generate impls on the **job** struct's `Job` trait.
 - Worker-specific attributes (`max_retries`, `retry_delay`, `cron`, `error`, `context`, `registry`) generate impls on the **worker** struct's `Worker<Args>` trait.
 - The process method signature changes from `process(&self, ctx: &Context<T>)` to `process(&self, job: &JobType, ctx: &JobContext)`.
@@ -81,7 +81,7 @@ The worker struct can be:
 ```rust
 #[derive(oxanus::Worker)]
 struct MyWorker;
-// Assumes job type is `MyWorkerJob`
+// Assumes job type is `MyJob`
 ```
 
 **Single-field struct** (auto `FromContext` — field is cloned from app context):
@@ -90,7 +90,7 @@ struct MyWorker;
 struct MyWorker {
     state: AppState,
 }
-// Assumes job type is `MyWorkerJob`
+// Assumes job type is `MyJob`
 ```
 
 For more complex cases, implement `FromContext` manually:

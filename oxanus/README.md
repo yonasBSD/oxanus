@@ -48,7 +48,7 @@ struct MyContext {}
 
 // Define your job data (the serialized payload)
 #[derive(Debug, Serialize, Deserialize)]
-struct MyWorkerJob {
+struct MyJob {
     data: String,
 }
 
@@ -57,7 +57,7 @@ struct MyWorkerJob {
 struct MyWorker;
 
 impl MyWorker {
-    async fn process(&self, job: &MyWorkerJob, _ctx: &oxanus::JobContext) -> Result<(), MyError> {
+    async fn process(&self, job: &MyJob, _ctx: &oxanus::JobContext) -> Result<(), MyError> {
         // Process your job here
         println!("Processing: {}", job.data);
         Ok(())
@@ -78,7 +78,7 @@ async fn main() -> Result<(), oxanus::OxanusError> {
         .with_graceful_shutdown(tokio::signal::ctrl_c());
 
     // Enqueue some jobs
-    storage.enqueue(MyQueue, MyWorkerJob { data: "hello".into() }).await?;
+    storage.enqueue(MyQueue, MyJob { data: "hello".into() }).await?;
 
     // Run the worker
     oxanus::run(config, ctx).await?;

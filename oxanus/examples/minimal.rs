@@ -11,7 +11,7 @@ enum WorkerError {}
 struct WorkerContext {}
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TestWorkerJob {
+struct TestJob {
     sleep_s: u64,
 }
 
@@ -19,11 +19,7 @@ struct TestWorkerJob {
 struct TestWorker;
 
 impl TestWorker {
-    async fn process(
-        &self,
-        job: &TestWorkerJob,
-        _ctx: &oxanus::JobContext,
-    ) -> Result<(), WorkerError> {
+    async fn process(&self, job: &TestJob, _ctx: &oxanus::JobContext) -> Result<(), WorkerError> {
         tokio::time::sleep(std::time::Duration::from_secs(job.sleep_s)).await;
         Ok(())
     }
@@ -46,12 +42,8 @@ pub async fn main() -> Result<(), oxanus::OxanusError> {
         .with_graceful_shutdown(tokio::signal::ctrl_c())
         .exit_when_processed(1);
 
-    storage
-        .enqueue(QueueOne, TestWorkerJob { sleep_s: 10 })
-        .await?;
-    storage
-        .enqueue(QueueOne, TestWorkerJob { sleep_s: 5 })
-        .await?;
+    storage.enqueue(QueueOne, TestJob { sleep_s: 10 }).await?;
+    storage.enqueue(QueueOne, TestJob { sleep_s: 5 }).await?;
 
     oxanus::run(config, ctx).await?;
 

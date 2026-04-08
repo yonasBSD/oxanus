@@ -193,7 +193,9 @@ pub fn expand_derive_worker(input: DeriveInput) -> TokenStream {
     let type_args = match &args.job {
         Some(path) => quote!(#path),
         None => {
-            let job_ident = Ident::new(&format!("{struct_ident}Job"), struct_ident.span());
+            let name = struct_ident.to_string();
+            let base = name.strip_suffix("Worker").unwrap_or(&name);
+            let job_ident = Ident::new(&format!("{base}Job"), struct_ident.span());
             quote!(#job_ident)
         }
     };

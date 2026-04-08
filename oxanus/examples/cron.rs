@@ -11,7 +11,7 @@ enum WorkerError {}
 struct WorkerContext {}
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TestWorkerJob {}
+struct TestJob {}
 
 #[derive(oxanus::Worker)]
 #[oxanus(context = WorkerContext)]
@@ -20,11 +20,7 @@ struct TestWorkerJob {}
 struct TestWorker;
 
 impl TestWorker {
-    async fn process(
-        &self,
-        _job: &TestWorkerJob,
-        _ctx: &oxanus::JobContext,
-    ) -> Result<(), WorkerError> {
+    async fn process(&self, _job: &TestJob, _ctx: &oxanus::JobContext) -> Result<(), WorkerError> {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         Ok(())
     }
