@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0]
+
+### Added
+- **Job/Worker separation**: job data (`Job` trait) is now separate from processing logic (`Worker<Args>` trait)
+- `FromContext` trait for injecting app state into workers (auto-derived for unit and single-field structs)
+- `JobContext` replaces generic `Context<T>`
+- `ContextValue::new(x)` replaces `Context::value(x)`
+- `#[oxanus(job = Type)]` attribute with `{WorkerName}Job` convention default
+- Migration guide ([MIGRATION.md](MIGRATION.md))
+
+### Changed
+- `#[derive(oxanus::Worker)]` now generates both `Job` and `Worker<Args>` impls
+- `config.register_worker::<W, J>()` replaces `config.register_worker::<W>()`
+- `storage.enqueue(queue, job)` now takes the job struct, not the worker struct
+- Cron `queue` attribute is now required at compile time (was runtime panic)
+- `job_envelope::Job` struct renamed to `JobData`
+- `Processable`/`BoxedProcessable` removed from public API
+
+### Removed
+- `Context<T>` generic context wrapper
+- `register_cron_worker` (use `register_worker` with cron attributes)
+- `test_helper.rs` (replaced by inline test utilities)
+
 ## [0.9.7]
 
 ### Added
