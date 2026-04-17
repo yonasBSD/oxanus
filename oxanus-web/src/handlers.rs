@@ -242,6 +242,12 @@ pub(crate) async fn enqueue_job(
     let id = uuid::Uuid::new_v4().to_string();
     let args: serde_json::Value =
         serde_json::from_str(&form.args).map_err(oxanus::OxanusError::from)?;
+    let job_state: Option<serde_json::Value> = match form.state.as_deref() {
+        Some(s) if !s.is_empty() => {
+            Some(serde_json::from_str(s).map_err(oxanus::OxanusError::from)?)
+        }
+        _ => None,
+    };
 
     let envelope = oxanus::JobEnvelope {
         id: id.clone(),
@@ -258,7 +264,7 @@ pub(crate) async fn enqueue_job(
             created_at: now,
             scheduled_at: now,
             started_at: None,
-            state: None,
+            state: job_state,
             resurrect: true,
             error: None,
             throttle_cost: None,
@@ -309,6 +315,8 @@ pub(crate) struct EnqueueJobForm {
     queue: String,
     name: String,
     args: String,
+    #[serde(default)]
+    state: Option<String>,
     #[serde(default)]
     redirect: Option<String>,
 }
