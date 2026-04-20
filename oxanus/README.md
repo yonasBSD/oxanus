@@ -186,7 +186,7 @@ let output = metrics.encode_to_string()?;
 
 | Feature | Oxanus | [Apalis](https://crates.io/crates/apalis) | [rusty-sidekiq](https://crates.io/crates/rusty-sidekiq) | [Fang](https://crates.io/crates/fang) |
 |---|---|---|---|---|
-| Backend | Redis | Redis, Postgres, SQLite, MySQL, AMQP, NATS | Redis | Postgres, SQLite, MySQL |
+| Backend | Redis | Redis, Postgres, `SQLite`, `MySQL`, AMQP, NATS | Redis | Postgres, `SQLite`, `MySQL` |
 | Retries | Yes | Yes (tower layer) | Yes | Yes |
 | Scheduled Jobs | Yes | Yes | Yes | Yes |
 | Cron | Yes | Yes | Yes | Yes |
