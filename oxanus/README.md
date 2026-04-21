@@ -32,6 +32,10 @@ Oxanus focuses on simplicity and depth over breadth - one backend, done well.
 
 ## Quick Start
 
+```bash
+cargo add oxanus
+```
+
 ```rust
 use oxanus::Storage;
 use serde::{Serialize, Deserialize};
