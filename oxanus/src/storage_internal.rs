@@ -421,28 +421,40 @@ impl StorageInternal {
             return Ok(0);
         }
 
-        let envelopes = self.get_many(&job_ids).await?;
-        let mut map: HashMap<&str, Vec<&JobEnvelope>> = HashMap::new();
+        let mut claim_pipe = redis::pipe();
+        for job_id in &job_ids {
+            claim_pipe.zrem(schedule_queue, job_id);
+        }
+        let claimed: Vec<u32> = claim_pipe.query_async(&mut redis).await?;
+
+        let claimed_job_ids: Vec<String> = job_ids
+            .into_iter()
+            .zip(claimed.iter())
+            .filter(|(_, removed)| **removed > 0)
+            .map(|(id, _)| id)
+            .collect();
+
+        if claimed_job_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let envelopes = self.get_many(&claimed_job_ids).await?;
         let envelopes_count = envelopes.len();
 
+        let mut enqueue_pipe = redis::pipe();
+        let mut map: HashMap<&str, Vec<&str>> = HashMap::new();
+
         for envelope in envelopes.iter() {
-            map.entry(&envelope.queue).or_default().push(envelope);
+            map.entry(&envelope.queue)
+                .or_default()
+                .push(envelope.id.as_str());
         }
 
-        let mut pipe = redis::pipe();
-
-        for (queue, envelopes) in map {
-            let job_ids: Vec<&str> = envelopes
-                .iter()
-                .map(|envelope| envelope.id.as_str())
-                .collect();
-
-            pipe.lpush(self.namespace_queue(queue), job_ids);
+        for (queue, job_ids) in map {
+            enqueue_pipe.lpush(self.namespace_queue(queue), job_ids);
         }
 
-        pipe.zrembyscore(schedule_queue, 0, now);
-
-        let _: () = pipe.query_async(&mut redis).await?;
+        let _: () = enqueue_pipe.query_async(&mut redis).await?;
 
         Ok(envelopes_count)
     }
