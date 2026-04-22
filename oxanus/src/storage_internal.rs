@@ -582,8 +582,8 @@ impl StorageInternal {
         redis: &mut deadpool_redis::Connection,
         queue: &str,
     ) -> Result<f64, OxanusError> {
-        let result: Vec<String> = (*redis).lrange(self.namespace_queue(queue), -1, -1).await?;
-        match result.first() {
+        let result: Option<String> = (*redis).lindex(self.namespace_queue(queue), -1).await?;
+        match result.as_ref() {
             Some(job_id) => {
                 let envelope = self.get_job_w_conn(redis, job_id).await?;
                 Ok(envelope.map_or(0.0, |envelope| {
@@ -1136,10 +1136,8 @@ impl StorageInternal {
     #[cfg(test)]
     async fn currently_processing_job_ids(&self) -> Result<Vec<String>, OxanusError> {
         let mut redis = self.connection().await?;
-        let job_ids: Vec<String> = (*redis)
-            .lrange(self.current_processing_queue(), 0, 0)
-            .await?;
-        Ok(job_ids)
+        let job_id: Option<String> = (*redis).lindex(self.current_processing_queue(), 0).await?;
+        Ok(job_id.into_iter().collect())
     }
 
     fn current_process(&self) -> Process {
