@@ -26,13 +26,12 @@ async-trait = "0.1"
 chrono = { version = "^0.4", features = ["serde"] }
 cron = "^0.16"
 deadpool-redis = "^0.23"
-redis = { version = "^1.2", features = ["aio", "tokio-comp"] }
 futures = { version = "^0.3" }
 gethostname = "^1.1"
 inventory = { version = "0.3", optional = true }
 prometheus-client = { version = "0.24", optional = true }
 sentry-core = { version = "^0", optional = true }
-serde = { version = "^1.0.228", features = ["derive"] }
+serde = { version = "^1.0", features = ["derive"] }
 serde_json = { version = "^1.0", features = ["preserve_order"] }
 thiserror = "^2.0"
 tokio = { version = "^1.52", features = ["full"] }
