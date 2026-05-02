@@ -312,6 +312,16 @@ where
                 }
             }
             _ = config.cancel_token.cancelled(), if pending.is_empty() => {
+                flush_batcher(
+                    Arc::clone(&config),
+                    ctx.clone(),
+                    result_tx.clone(),
+                    batch_error_tx.clone(),
+                    &mut rx,
+                    &mut pending,
+                    batch_size,
+                )
+                .await;
                 return Ok(());
             }
         }
@@ -356,13 +366,16 @@ where
                     break;
                 }
                 _ = config.cancel_token.cancelled() => {
-                    spawn_batch(
+                    flush_batcher(
                         Arc::clone(&config),
                         ctx.clone(),
                         result_tx.clone(),
                         batch_error_tx.clone(),
+                        &mut rx,
                         &mut pending,
-                    );
+                        batch_size,
+                    )
+                    .await;
                     return Ok(());
                 }
             }
@@ -376,6 +389,36 @@ where
             &mut pending,
         );
     }
+}
+
+async fn flush_batcher<DT, ET>(
+    config: Arc<Config<DT, ET>>,
+    ctx: ContextValue<DT>,
+    result_tx: mpsc::Sender<JobResult>,
+    batch_error_tx: mpsc::Sender<OxanusError>,
+    rx: &mut mpsc::Receiver<PendingJob>,
+    pending: &mut Vec<PendingJob>,
+    batch_size: usize,
+) where
+    DT: Send + Sync + Clone + 'static,
+    ET: std::error::Error + Send + Sync + 'static,
+{
+    rx.close();
+
+    while let Some(job) = rx.recv().await {
+        pending.push(job);
+        if pending.len() >= batch_size {
+            spawn_batch(
+                Arc::clone(&config),
+                ctx.clone(),
+                result_tx.clone(),
+                batch_error_tx.clone(),
+                pending,
+            );
+        }
+    }
+
+    spawn_batch(config, ctx, result_tx, batch_error_tx, pending);
 }
 
 fn spawn_batch<DT, ET>(
@@ -447,10 +490,18 @@ where
         }
     };
 
-    for invalid in batch.invalid.iter().rev() {
+    let mut invalid_jobs = batch.invalid.iter().collect::<Vec<_>>();
+    invalid_jobs.sort_by_key(|invalid| std::cmp::Reverse(invalid.index));
+
+    let mut last_removed_index = None;
+    for invalid in invalid_jobs {
         if invalid.index >= envelopes.len() {
             continue;
         }
+        if last_removed_index == Some(invalid.index) {
+            continue;
+        }
+        last_removed_index = Some(invalid.index);
 
         let envelope = envelopes.remove(invalid.index);
         let permit = permits.remove(invalid.index);
@@ -612,5 +663,118 @@ async fn wait_for_workers_to_finish<DT, ET>(
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PendingJob, process_pending_batch};
+    use crate::test_helper::{random_string, redis_pool};
+    use crate::worker_registry::{self, BatchBuild, InvalidBatchJob, WorkerConfigKind};
+    use crate::{Config, ContextValue, Job, JobEnvelope, Storage, Worker, WorkerConfig};
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+    use testresult::TestResult;
+    use tokio::sync::{Semaphore, mpsc};
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct UnsortedInvalidJob;
+
+    impl Job for UnsortedInvalidJob {
+        fn worker_name() -> &'static str {
+            std::any::type_name::<UnsortedInvalidWorker>()
+        }
+    }
+
+    struct UnsortedInvalidWorker;
+
+    impl crate::FromContext<()> for UnsortedInvalidWorker {
+        fn from_context(_ctx: &()) -> Self {
+            Self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Worker<UnsortedInvalidJob> for UnsortedInvalidWorker {
+        type Error = std::io::Error;
+
+        async fn run_batch(
+            &self,
+            _jobs: Vec<crate::BatchItem<UnsortedInvalidJob>>,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn unsorted_invalid_batch_factory(
+        _values: Vec<serde_json::Value>,
+        _ctx: &(),
+    ) -> Result<BatchBuild<std::io::Error>, crate::OxanusError> {
+        Ok(BatchBuild {
+            job: None,
+            invalid: vec![
+                InvalidBatchJob {
+                    index: 1,
+                    error: "second invalid".to_string(),
+                },
+                InvalidBatchJob {
+                    index: 0,
+                    error: "first invalid".to_string(),
+                },
+            ],
+        })
+    }
+
+    #[tokio::test]
+    async fn process_pending_batch_handles_unsorted_invalid_indexes() -> TestResult {
+        let pool = redis_pool().await?;
+        let storage = Storage::builder()
+            .namespace(random_string())
+            .build_from_pool(pool)?;
+        let queue = random_string();
+        let mut config = Config::new(&storage);
+        config.register_worker_with(WorkerConfig {
+            name: UnsortedInvalidJob::worker_name().to_string(),
+            factory: worker_registry::job_factory::<
+                UnsortedInvalidWorker,
+                UnsortedInvalidJob,
+                (),
+                std::io::Error,
+            >,
+            batch_factory: unsorted_invalid_batch_factory,
+            batch_config: Some(crate::WorkerBatchConfig::new(
+                2,
+                std::time::Duration::from_millis(100),
+            )),
+            kind: WorkerConfigKind::Normal,
+        });
+
+        let envelopes = vec![
+            JobEnvelope::new(queue.clone(), UnsortedInvalidJob)?,
+            JobEnvelope::new(queue.clone(), UnsortedInvalidJob)?,
+        ];
+        for envelope in &envelopes {
+            storage.internal.enqueue(envelope.clone()).await?;
+        }
+        for _ in &envelopes {
+            storage.internal.dequeue(&queue).await?;
+        }
+
+        let semaphore = Arc::new(Semaphore::new(envelopes.len()));
+        let mut pending = Vec::with_capacity(envelopes.len());
+        for envelope in envelopes {
+            pending.push(PendingJob {
+                envelope,
+                permit: Arc::clone(&semaphore).acquire_owned().await?,
+            });
+        }
+        let (result_tx, _result_rx) = mpsc::channel(1);
+
+        process_pending_batch(Arc::new(config), ContextValue::new(()), result_tx, pending).await?;
+
+        assert_eq!(storage.dead_count().await?, 2);
+        assert_eq!(storage.jobs_count().await?, 0);
+
+        Ok(())
     }
 }

@@ -134,6 +134,8 @@ Jobs carry the data that gets enqueued and define enqueue-time metadata. Workers
 
 For job hooks, `Self::...` resolves to the job type. For worker hooks, `Self::...` resolves to the worker type.
 
+Batch workers use all-or-nothing result semantics: if `process_batch` returns `Ok(())`, every job in the batch is marked successful; if it returns an error or panics, every job in that batch follows the normal retry or failure path. Batch handlers should therefore be idempotent, or should only commit external side effects after the whole batch is ready to succeed.
+
 ### Queues
 
 Queues are the channels through which jobs flow. Use the `#[derive(oxanus::Queue)]` macro or implement the `Queue` trait manually.
