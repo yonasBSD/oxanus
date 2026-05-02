@@ -19,6 +19,8 @@ pub enum ServiceError {
 #[derive(Debug, Clone)]
 pub struct WorkerState {}
 
+#[derive(oxanus::Worker)]
+#[oxanus(context = WorkerState, error = ServiceError, registry = None)]
 pub struct WorkerNoop;
 
 impl oxanus::Job for WorkerNoopJob {
@@ -27,24 +29,13 @@ impl oxanus::Job for WorkerNoopJob {
     }
 }
 
-impl oxanus::FromContext<WorkerState> for WorkerNoop {
-    fn from_context(_ctx: &WorkerState) -> Self {
-        Self
-    }
-}
-
-#[async_trait::async_trait]
-impl oxanus::Worker<WorkerNoopJob> for WorkerNoop {
-    type Error = ServiceError;
-
-    async fn run_batch(
+impl WorkerNoop {
+    async fn process(
         &self,
-        jobs: Vec<oxanus::BatchItem<WorkerNoopJob>>,
+        job: WorkerNoopJob,
+        _ctx: &oxanus::JobContext,
     ) -> Result<(), ServiceError> {
-        for item in jobs {
-            let job = item.job;
-            tokio::time::sleep(std::time::Duration::from_millis(job.sleep_ms)).await;
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(job.sleep_ms)).await;
         Ok(())
     }
 }
