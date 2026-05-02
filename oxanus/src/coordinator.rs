@@ -7,7 +7,7 @@ use crate::WorkerBatchConfig;
 use crate::config::Config;
 use crate::context::ContextValue;
 use crate::error::OxanusError;
-use crate::executor::ExecutionError;
+use crate::executor::{ExecutionError, ExecutionOutcome};
 use crate::job_envelope::JobEnvelope;
 use crate::queue::{QueueConfig, QueueKind};
 use crate::result_collector::{JobResult, JobResultKind};
@@ -78,7 +78,14 @@ where
         }
     }
 
+    drop(batchers);
     wait_for_workers_to_finish(config, Arc::clone(&semaphores)).await;
+    drop(result_tx);
+    drop(batch_error_tx);
+
+    while let Some(task_result) = joinset.join_next().await {
+        task_result??;
+    }
 
     Ok(())
 }
@@ -523,10 +530,10 @@ where
         return Ok(());
     };
 
-    let result = executor::run_batch(Arc::clone(&config), job, &mut envelopes).await?;
+    let outcome = executor::run_batch(Arc::clone(&config), job, &mut envelopes).await?;
     drop(permits);
 
-    process_batch_result(result_tx, &result, envelopes).await;
+    process_batch_result(result_tx, outcome, envelopes).await;
 
     Ok(())
 }
@@ -548,12 +555,12 @@ fn invalid_jobs_by_index(
 
 async fn process_result<ET>(
     result_tx: mpsc::Sender<JobResult>,
-    result: Result<(), ExecutionError<ET>>,
+    outcome: ExecutionOutcome<ET>,
     envelope: JobEnvelope,
 ) where
     ET: std::error::Error + Send + Sync + 'static,
 {
-    let kind = match result {
+    let kind = match outcome.result {
         Ok(()) => JobResultKind::Success,
         Err(e) => match e {
             ExecutionError::NotPanic(_) => JobResultKind::Failed,
@@ -561,26 +568,40 @@ async fn process_result<ET>(
         },
     };
 
-    result_tx.send(JobResult { envelope, kind }).await.ok();
+    result_tx
+        .send(JobResult {
+            envelope,
+            kind,
+            duration_ms: outcome.duration_ms,
+        })
+        .await
+        .ok();
 }
 
 async fn process_batch_result<ET>(
     result_tx: mpsc::Sender<JobResult>,
-    result: &Result<(), ExecutionError<ET>>,
+    outcome: ExecutionOutcome<ET>,
     envelopes: Vec<JobEnvelope>,
 ) where
     ET: std::error::Error + Send + Sync + 'static,
 {
-    for envelope in envelopes {
-        let kind = match result {
-            Ok(()) => JobResultKind::Success,
-            Err(e) => match e {
-                ExecutionError::NotPanic(_) => JobResultKind::Failed,
-                ExecutionError::Panic() => JobResultKind::Panicked,
-            },
-        };
+    let kind = match outcome.result {
+        Ok(()) => JobResultKind::Success,
+        Err(e) => match e {
+            ExecutionError::NotPanic(_) => JobResultKind::Failed,
+            ExecutionError::Panic() => JobResultKind::Panicked,
+        },
+    };
 
-        result_tx.send(JobResult { envelope, kind }).await.ok();
+    for envelope in envelopes {
+        result_tx
+            .send(JobResult {
+                envelope,
+                kind,
+                duration_ms: outcome.duration_ms,
+            })
+            .await
+            .ok();
     }
 }
 
