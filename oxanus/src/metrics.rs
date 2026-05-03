@@ -576,18 +576,25 @@ mod tests {
         assert_eq!(minutes.len(), MAX_METRIC_MINUTES);
 
         let mut hashes = vec![HashMap::new(); minutes.len()];
-        hashes[0].insert(identity.metric_field(METRIC_PROCESSED_JOBS), 3);
-        hashes[0].insert(identity.metric_field(METRIC_FAILED_JOBS), 1);
-        hashes[0].insert(identity.metric_field(METRIC_SUCCESSFUL_EXECUTIONS), 2);
-        hashes[0].insert(identity.metric_field(METRIC_FAILED_EXECUTIONS), 1);
-        hashes[0].insert(identity.metric_field(METRIC_EXECUTION_MS), 250);
-        hashes[1].insert(other.metric_field(METRIC_PROCESSED_JOBS), 2);
-        hashes[1].insert(other.metric_field(METRIC_FAILED_JOBS), 1);
-        hashes[1].insert(other.metric_field(METRIC_PANICKED_JOBS), 1);
-        hashes[1].insert(other.metric_field(METRIC_SUCCESSFUL_EXECUTIONS), 1);
-        hashes[1].insert(other.metric_field(METRIC_FAILED_EXECUTIONS), 1);
-        hashes[1].insert(other.metric_field(METRIC_PANICKED_EXECUTIONS), 1);
-        hashes[1].insert(other.metric_field(METRIC_EXECUTION_MS), 100);
+        let first_hash = hashes
+            .get_mut(0)
+            .expect("query should include a first minute bucket");
+        first_hash.insert(identity.metric_field(METRIC_PROCESSED_JOBS), 3);
+        first_hash.insert(identity.metric_field(METRIC_FAILED_JOBS), 1);
+        first_hash.insert(identity.metric_field(METRIC_SUCCESSFUL_EXECUTIONS), 2);
+        first_hash.insert(identity.metric_field(METRIC_FAILED_EXECUTIONS), 1);
+        first_hash.insert(identity.metric_field(METRIC_EXECUTION_MS), 250);
+
+        let second_hash = hashes
+            .get_mut(1)
+            .expect("query should include a second minute bucket");
+        second_hash.insert(other.metric_field(METRIC_PROCESSED_JOBS), 2);
+        second_hash.insert(other.metric_field(METRIC_FAILED_JOBS), 1);
+        second_hash.insert(other.metric_field(METRIC_PANICKED_JOBS), 1);
+        second_hash.insert(other.metric_field(METRIC_SUCCESSFUL_EXECUTIONS), 1);
+        second_hash.insert(other.metric_field(METRIC_FAILED_EXECUTIONS), 1);
+        second_hash.insert(other.metric_field(METRIC_PANICKED_EXECUTIONS), 1);
+        second_hash.insert(other.metric_field(METRIC_EXECUTION_MS), 100);
 
         let aggregation = aggregate_counter_hashes(&minutes, hashes.clone(), None);
         assert_eq!(aggregation.totals.processed, 5);
@@ -600,21 +607,29 @@ mod tests {
         assert_eq!(aggregation.totals.failed_executions_without_panics(), 1);
         assert_eq!(aggregation.totals.execution_ms, 350);
         assert_eq!(aggregation.workers.len(), 2);
-        assert_eq!(aggregation.workers[0].series.len(), MAX_METRIC_MINUTES);
-        assert_eq!(aggregation.workers[0].series[0].processed, 3);
-        assert_eq!(aggregation.workers[0].series[0].failed, 1);
-        assert_eq!(aggregation.workers[0].series[0].succeeded, 2);
-        assert_eq!(aggregation.workers[0].series[0].successful_executions, 2);
-        assert_eq!(aggregation.workers[0].series[0].execution_ms, 250);
-        assert_eq!(aggregation.workers[1].totals.panicked, 1);
-        assert_eq!(aggregation.workers[1].totals.failed_executions, 1);
-        assert_eq!(aggregation.workers[1].totals.panicked_executions, 1);
-        assert_eq!(
-            aggregation.workers[1]
-                .totals
-                .failed_executions_without_panics(),
-            0
-        );
+        let first_worker = aggregation
+            .workers
+            .first()
+            .expect("first worker summary should exist");
+        let first_point = first_worker
+            .series
+            .first()
+            .expect("first worker should have a first series point");
+        assert_eq!(first_worker.series.len(), MAX_METRIC_MINUTES);
+        assert_eq!(first_point.processed, 3);
+        assert_eq!(first_point.failed, 1);
+        assert_eq!(first_point.succeeded, 2);
+        assert_eq!(first_point.successful_executions, 2);
+        assert_eq!(first_point.execution_ms, 250);
+
+        let second_worker = aggregation
+            .workers
+            .get(1)
+            .expect("second worker summary should exist");
+        assert_eq!(second_worker.totals.panicked, 1);
+        assert_eq!(second_worker.totals.failed_executions, 1);
+        assert_eq!(second_worker.totals.panicked_executions, 1);
+        assert_eq!(second_worker.totals.failed_executions_without_panics(), 0);
 
         let filtered = aggregate_counter_hashes(&minutes, hashes, Some(&identity));
         assert_eq!(filtered.totals.processed, 3);
@@ -623,7 +638,15 @@ mod tests {
         assert_eq!(filtered.totals.successful_executions, 2);
         assert_eq!(filtered.totals.execution_ms, 250);
         assert_eq!(filtered.workers.len(), 1);
-        assert_eq!(filtered.workers[0].series[1].processed, 0);
+        let filtered_worker = filtered
+            .workers
+            .first()
+            .expect("filtered worker summary should exist");
+        let empty_point = filtered_worker
+            .series
+            .get(1)
+            .expect("filtered worker should have a second series point");
+        assert_eq!(empty_point.processed, 0);
     }
 
     #[test]

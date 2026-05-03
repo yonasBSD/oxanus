@@ -108,6 +108,30 @@ where
     Ok(())
 }
 
+async fn flush_metrics<DT, ET>(
+    config: Arc<Config<DT, ET>>,
+    metrics: &mut JobMetricsBuffer,
+) -> Result<(), OxanusError>
+where
+    DT: Send + Sync + Clone + 'static,
+    ET: std::error::Error + Send + Sync + 'static,
+{
+    if metrics.is_empty() {
+        return Ok(());
+    }
+
+    if config
+        .storage
+        .internal
+        .track_redis_result(config.storage.internal.flush_job_metrics(metrics).await)?
+        .is_some()
+    {
+        metrics.clear();
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,28 +198,4 @@ mod tests {
 
         Ok(())
     }
-}
-
-async fn flush_metrics<DT, ET>(
-    config: Arc<Config<DT, ET>>,
-    metrics: &mut JobMetricsBuffer,
-) -> Result<(), OxanusError>
-where
-    DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
-{
-    if metrics.is_empty() {
-        return Ok(());
-    }
-
-    if config
-        .storage
-        .internal
-        .track_redis_result(config.storage.internal.flush_job_metrics(metrics).await)?
-        .is_some()
-    {
-        metrics.clear();
-    }
-
-    Ok(())
 }
