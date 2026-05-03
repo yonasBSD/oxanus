@@ -418,15 +418,14 @@ fn sort_queues(
 }
 
 fn compare_eta(a: Option<f64>, b: Option<f64>, desc: bool) -> std::cmp::Ordering {
-    match (a, b) {
-        (Some(a), Some(b)) => {
-            let cmp = a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal);
-            if desc { cmp.reverse() } else { cmp }
-        }
+    let cmp = match (a, b) {
+        (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
-    }
+    };
+
+    if desc { cmp.reverse() } else { cmp }
 }
 
 fn build_cron_rows(
@@ -497,4 +496,61 @@ fn build_cron_rows(
     let mut rows = Vec::new();
     flatten(&root, 0, &mut rows);
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sort_queues;
+    use std::collections::HashMap;
+
+    fn queue_with_eta(key: &str, eta_s: Option<f64>) -> oxanus::QueueStats {
+        oxanus::QueueStats {
+            key: key.to_string(),
+            enqueued: 0,
+            processed: 0,
+            succeeded: 0,
+            panicked: 0,
+            failed: 0,
+            latency_s: 0.0,
+            rate: oxanus::QueueRateStats {
+                eta_s,
+                ..oxanus::QueueRateStats::default()
+            },
+            queues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn eta_sort_ascending_places_unknown_last() {
+        let mut queues = vec![
+            queue_with_eta("never", None),
+            queue_with_eta("slow", Some(30.0)),
+            queue_with_eta("fast", Some(10.0)),
+        ];
+
+        sort_queues(&mut queues, &HashMap::new(), "eta", false);
+
+        let keys = queues
+            .iter()
+            .map(|queue| queue.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["fast", "slow", "never"]);
+    }
+
+    #[test]
+    fn eta_sort_descending_places_unknown_first() {
+        let mut queues = vec![
+            queue_with_eta("fast", Some(10.0)),
+            queue_with_eta("never", None),
+            queue_with_eta("slow", Some(30.0)),
+        ];
+
+        sort_queues(&mut queues, &HashMap::new(), "eta", true);
+
+        let keys = queues
+            .iter()
+            .map(|queue| queue.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["never", "slow", "fast"]);
+    }
 }
