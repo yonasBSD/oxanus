@@ -2365,11 +2365,8 @@ mod tests {
         assert_close(static_stats.rate.succeeded_per_minute, 0.4);
         assert_close(static_stats.rate.failed_per_minute, 0.2);
         assert_close(static_stats.rate.growth_per_minute, 0.3);
-        assert_close(static_stats.rate.effective_drain_per_minute, 0.3);
-        assert_close(
-            static_stats.rate.eta_s.expect("eta should be finite"),
-            600.0,
-        );
+        assert_close(static_stats.rate.effective_drain_per_minute, 0.0);
+        assert!(static_stats.rate.eta_s.is_none());
 
         let dynamic_stats = stats
             .queues
@@ -2380,11 +2377,8 @@ mod tests {
         assert_close(dynamic_stats.rate.succeeded_per_minute, 0.4);
         assert_close(dynamic_stats.rate.failed_per_minute, 0.2);
         assert_close(dynamic_stats.rate.growth_per_minute, 0.3);
-        assert_close(dynamic_stats.rate.effective_drain_per_minute, 0.3);
-        assert_close(
-            dynamic_stats.rate.eta_s.expect("eta should be finite"),
-            600.0,
-        );
+        assert_close(dynamic_stats.rate.effective_drain_per_minute, 0.0);
+        assert!(dynamic_stats.rate.eta_s.is_none());
 
         let dynamic_queue_stats = dynamic_stats
             .queues
@@ -2395,14 +2389,8 @@ mod tests {
         assert_close(dynamic_queue_stats.rate.succeeded_per_minute, 0.0);
         assert_close(dynamic_queue_stats.rate.failed_per_minute, 0.2);
         assert_close(dynamic_queue_stats.rate.growth_per_minute, 0.1);
-        assert_close(dynamic_queue_stats.rate.effective_drain_per_minute, 0.1);
-        assert_close(
-            dynamic_queue_stats
-                .rate
-                .eta_s
-                .expect("eta should be finite"),
-            600.0,
-        );
+        assert_close(dynamic_queue_stats.rate.effective_drain_per_minute, 0.0);
+        assert!(dynamic_queue_stats.rate.eta_s.is_none());
 
         Ok(())
     }

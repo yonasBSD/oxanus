@@ -60,7 +60,7 @@ pub struct QueueRateStats {
     pub failed_per_minute: f64,
     /// Net queue growth per minute over the window.
     pub growth_per_minute: f64,
-    /// Processing capacity remaining after incoming growth.
+    /// Observed queue drain after incoming growth is accounted for.
     pub effective_drain_per_minute: f64,
     /// Estimated seconds until the waiting queue drains.
     pub eta_s: Option<f64>,
@@ -81,7 +81,8 @@ impl QueueRateStats {
         let succeeded_per_minute = succeeded as f64 / window;
         let failed_per_minute = failed as f64 / window;
         let growth_per_minute = (enqueued as f64 - window_start_enqueued as f64) / window;
-        let effective_drain_per_minute = processed_per_minute - growth_per_minute.max(0.0);
+        let effective_drain_per_minute =
+            Self::effective_drain(processed_per_minute, growth_per_minute);
 
         Self {
             window_minutes,
@@ -112,7 +113,8 @@ impl QueueRateStats {
             growth_per_minute += rate.growth_per_minute;
         }
 
-        let effective_drain_per_minute = processed_per_minute - growth_per_minute.max(0.0);
+        let effective_drain_per_minute =
+            Self::effective_drain(processed_per_minute, growth_per_minute);
 
         Self {
             window_minutes,
@@ -132,6 +134,14 @@ impl QueueRateStats {
             Some(enqueued as f64 / (effective_drain_per_minute / 60.0))
         } else {
             None
+        }
+    }
+
+    fn effective_drain(processed_per_minute: f64, growth_per_minute: f64) -> f64 {
+        if processed_per_minute > 0.0 {
+            (-growth_per_minute).max(0.0)
+        } else {
+            0.0
         }
     }
 }
@@ -220,23 +230,23 @@ mod tests {
 
     #[test]
     fn queue_rate_calculates_eta_when_effective_drain_is_positive() {
-        let rate = QueueRateStats::calculate(10, 30, 10, 50, 40, 10);
+        let rate = QueueRateStats::calculate(10, 10, 30, 50, 40, 10);
 
         assert_close(rate.processed_per_minute, 5.0);
         assert_close(rate.succeeded_per_minute, 4.0);
         assert_close(rate.failed_per_minute, 1.0);
-        assert_close(rate.growth_per_minute, 2.0);
-        assert_close(rate.effective_drain_per_minute, 3.0);
-        assert_close(rate.eta_s.expect("eta should be finite"), 600.0);
+        assert_close(rate.growth_per_minute, -2.0);
+        assert_close(rate.effective_drain_per_minute, 2.0);
+        assert_close(rate.eta_s.expect("eta should be finite"), 300.0);
     }
 
     #[test]
-    fn queue_rate_eta_is_unknown_when_growth_exceeds_processing() {
-        let rate = QueueRateStats::calculate(10, 50, 0, 20, 20, 0);
+    fn queue_rate_eta_is_unknown_when_queue_grows_despite_processing() {
+        let rate = QueueRateStats::calculate(10, 20, 0, 100, 100, 0);
 
-        assert_close(rate.processed_per_minute, 2.0);
-        assert_close(rate.growth_per_minute, 5.0);
-        assert_close(rate.effective_drain_per_minute, -3.0);
+        assert_close(rate.processed_per_minute, 10.0);
+        assert_close(rate.growth_per_minute, 2.0);
+        assert_close(rate.effective_drain_per_minute, 0.0);
         assert!(rate.eta_s.is_none());
     }
 
@@ -249,17 +259,26 @@ mod tests {
     }
 
     #[test]
+    fn queue_rate_eta_is_unknown_without_processing_rate() {
+        let rate = QueueRateStats::calculate(10, 10, 20, 0, 0, 0);
+
+        assert_close(rate.growth_per_minute, -1.0);
+        assert_close(rate.effective_drain_per_minute, 0.0);
+        assert!(rate.eta_s.is_none());
+    }
+
+    #[test]
     fn queue_rate_aggregates_dynamic_children() {
-        let first = QueueRateStats::calculate(10, 10, 0, 30, 25, 5);
-        let second = QueueRateStats::calculate(10, 20, 10, 40, 35, 5);
+        let first = QueueRateStats::calculate(10, 10, 20, 30, 25, 5);
+        let second = QueueRateStats::calculate(10, 20, 30, 40, 35, 5);
 
         let rate = QueueRateStats::aggregate(10, 30, [first, second]);
 
         assert_close(rate.processed_per_minute, 7.0);
         assert_close(rate.succeeded_per_minute, 6.0);
         assert_close(rate.failed_per_minute, 1.0);
-        assert_close(rate.growth_per_minute, 2.0);
-        assert_close(rate.effective_drain_per_minute, 5.0);
-        assert_close(rate.eta_s.expect("eta should be finite"), 360.0);
+        assert_close(rate.growth_per_minute, -2.0);
+        assert_close(rate.effective_drain_per_minute, 2.0);
+        assert_close(rate.eta_s.expect("eta should be finite"), 900.0);
     }
 }
