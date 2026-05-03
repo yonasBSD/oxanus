@@ -45,6 +45,8 @@ pub(crate) async fn queues_list(
     Query(params): Query<QueuesParams>,
 ) -> Result<QueuesTemplate, OxanusWebError> {
     let mut stats = state.storage.stats().await?;
+    let query = oxanus::JobMetricsQuery::new(params.minutes.unwrap_or(0));
+    let queue_lengths = state.storage.queue_length_metrics(query).await?;
 
     let sort = params.sort.as_deref().unwrap_or("key");
     let dir = params.dir.as_deref().unwrap_or("asc");
@@ -57,6 +59,7 @@ pub(crate) async fn queues_list(
         active_tab: "/queues",
         stats,
         concurrency_map: state.concurrency_map,
+        queue_lengths,
         sort: sort.to_string(),
         dir: dir.to_string(),
     })
@@ -68,13 +71,11 @@ pub(crate) async fn metrics(
 ) -> Result<MetricsTemplate, OxanusWebError> {
     let query = oxanus::JobMetricsQuery::new(params.minutes.unwrap_or(0));
     let metrics = state.storage.job_metrics(query).await?;
-    let queue_lengths = state.storage.queue_length_metrics(query).await?;
 
     Ok(MetricsTemplate {
         base_path: state.base_path,
         active_tab: "/metrics",
         metrics,
-        queue_lengths,
     })
 }
 
@@ -347,6 +348,8 @@ pub(crate) struct QueuesParams {
     sort: Option<String>,
     #[serde(default)]
     dir: Option<String>,
+    #[serde(default)]
+    minutes: Option<usize>,
 }
 
 #[derive(Deserialize)]
