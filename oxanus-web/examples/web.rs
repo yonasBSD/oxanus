@@ -256,7 +256,7 @@ async fn seed_sample_jobs(storage: &oxanus::Storage) -> Result<(), oxanus::Oxanu
         )
         .await?;
 
-    println!("Seeded 44 sample jobs across default and priority queues");
+    println!("Seeded sample jobs across default and priority queues");
 
     Ok(())
 }
