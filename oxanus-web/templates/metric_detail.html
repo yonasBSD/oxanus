@@ -63,23 +63,23 @@
 
         <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-8">
             <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Processed</div>
+                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Processed Jobs</div>
                 <div class="text-2xl font-semibold text-green-400">{{ metrics.totals.processed|format_number_u64 }}</div>
             </div>
             <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Failures</div>
+                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Failed Jobs</div>
                 <div class="text-2xl font-semibold text-red-400">{{ metrics.totals.failed|format_number_u64 }}</div>
             </div>
             <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Success</div>
+                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Succeeded Jobs</div>
                 <div class="text-2xl font-semibold text-emerald-400">{{ metrics.totals.succeeded|format_number_u64 }}</div>
             </div>
             <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Total Time</div>
+                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Total Execution Time</div>
                 <div class="text-2xl font-semibold text-blue-400">{{ metrics.totals.execution_ms|format_duration_ms }}</div>
             </div>
             <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
-                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Avg Time</div>
+                <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">Avg Execution Time</div>
                 <div class="text-2xl font-semibold text-purple-400">{{ metrics.totals.average_execution_ms()|format_duration_ms_f64 }}</div>
             </div>
         </div>
@@ -95,9 +95,9 @@
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
                     <h2 class="text-lg font-semibold">Total Executions</h2>
                     <div class="flex flex-wrap gap-x-4 gap-y-2 text-xs text-gray-400">
-                        <span class="inline-flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-emerald-400"></span>Success</span>
-                        <span class="inline-flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-red-500"></span>Failures</span>
-                        <span class="inline-flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-black ring-1 ring-gray-500"></span>Panics</span>
+                        <span class="inline-flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-emerald-400"></span>Succeeded</span>
+                        <span class="inline-flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-red-500"></span>Failed</span>
+                        <span class="inline-flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-black ring-1 ring-gray-500"></span>Panicked</span>
                     </div>
                 </div>
                 <div class="relative bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -358,9 +358,9 @@
 
                     tooltip.innerHTML =
                         '<div><span class="chart-tooltip-label">Time:</span> ' + formatTime(timestamps[idx]) + '</div>' +
-                        '<div><span class="chart-tooltip-label">Success:</span> ' + formatCount(succeeded[idx] || 0) + '</div>' +
-                        '<div><span class="chart-tooltip-label">Failures:</span> ' + formatCount(failed[idx] || 0) + '</div>' +
-                        '<div><span class="chart-tooltip-label">Panics:</span> ' + formatCount(panicked[idx] || 0) + '</div>' +
+                        '<div><span class="chart-tooltip-label">Succeeded:</span> ' + formatCount(succeeded[idx] || 0) + '</div>' +
+                        '<div><span class="chart-tooltip-label">Failed:</span> ' + formatCount(failed[idx] || 0) + '</div>' +
+                        '<div><span class="chart-tooltip-label">Panicked:</span> ' + formatCount(panicked[idx] || 0) + '</div>' +
                         '<div><span class="chart-tooltip-label">Total:</span> ' + formatCount(totals[idx] || 0) + '</div>';
                     tooltip.classList.remove('hidden');
 

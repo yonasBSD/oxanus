@@ -1,9 +1,9 @@
-//! Sidekiq-style execution metrics for Oxanus jobs.
+//! Sidekiq-style execution metrics for Oxanus workers.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::result_collector::{JobResult, JobResultKind};
+use crate::result_collector::{WorkerResult, WorkerResultKind};
 
 pub(crate) const METRICS_RETENTION_SECS: i64 = 8 * 60 * 60;
 pub(crate) const DEFAULT_METRIC_MINUTES: usize = 60;
@@ -34,15 +34,23 @@ pub const HISTOGRAM_BUCKET_LABELS: [&str; HISTOGRAM_BUCKET_COUNT] = [
     "5min", "Slow",
 ];
 
+pub(crate) const METRIC_PROCESSED_JOBS: &str = "p";
+pub(crate) const METRIC_FAILED_JOBS: &str = "f";
+pub(crate) const METRIC_PANICKED_JOBS: &str = "pn";
+pub(crate) const METRIC_SUCCESSFUL_EXECUTIONS: &str = "xs";
+pub(crate) const METRIC_FAILED_EXECUTIONS: &str = "xf";
+pub(crate) const METRIC_PANICKED_EXECUTIONS: &str = "xpn";
+pub(crate) const METRIC_EXECUTION_MS: &str = "ms";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MetricIdentity {
     pub worker: String,
 }
 
 impl MetricIdentity {
-    pub(crate) fn from_result(result: &JobResult) -> Self {
+    pub(crate) fn from_worker_result(result: &WorkerResult) -> Self {
         Self {
-            worker: result.envelope.job.name.clone(),
+            worker: result.worker_name.clone(),
         }
     }
 
@@ -100,20 +108,31 @@ impl Default for JobMetricsQuery {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JobMetricsTotals {
+    /// Jobs completed, including successes, failures, and panics. Batch jobs count individually.
     pub processed: u64,
+    /// Jobs completed successfully. Batch jobs count individually.
     pub succeeded: u64,
+    /// Jobs that failed or panicked. Batch jobs count individually.
     pub failed: u64,
+    /// Jobs that panicked. Batch jobs count individually.
     pub panicked: u64,
+    /// Successful worker executions. Batch workers count once per batch.
+    pub successful_executions: u64,
+    /// Worker executions that failed or panicked. Batch workers count once per batch.
+    pub failed_executions: u64,
+    /// Panicked worker executions. Batch workers count once per batch.
+    pub panicked_executions: u64,
+    /// Total duration for successful worker executions. Batch duration counts once per batch.
     pub execution_ms: u64,
 }
 
 impl JobMetricsTotals {
     #[must_use]
     pub fn average_execution_ms(&self) -> f64 {
-        if self.succeeded == 0 {
+        if self.successful_executions == 0 {
             0.0
         } else {
-            self.execution_ms as f64 / self.succeeded as f64
+            self.execution_ms as f64 / self.successful_executions as f64
         }
     }
 
@@ -122,71 +141,132 @@ impl JobMetricsTotals {
         self.execution_ms as f64 / 1000.0
     }
 
+    #[must_use]
+    pub fn failed_executions_without_panics(&self) -> u64 {
+        self.failed_executions
+            .saturating_sub(self.panicked_executions)
+    }
+
     fn add_metric(&mut self, metric: &str, value: u64) {
         match metric {
-            "p" => self.processed = self.processed.saturating_add(value),
-            "f" => self.failed = self.failed.saturating_add(value),
-            "pn" => self.panicked = self.panicked.saturating_add(value),
-            "ms" => self.execution_ms = self.execution_ms.saturating_add(value),
+            METRIC_PROCESSED_JOBS => self.processed = self.processed.saturating_add(value),
+            METRIC_FAILED_JOBS => self.failed = self.failed.saturating_add(value),
+            METRIC_PANICKED_JOBS => self.panicked = self.panicked.saturating_add(value),
+            METRIC_SUCCESSFUL_EXECUTIONS => {
+                self.successful_executions = self.successful_executions.saturating_add(value);
+            }
+            METRIC_FAILED_EXECUTIONS => {
+                self.failed_executions = self.failed_executions.saturating_add(value);
+            }
+            METRIC_PANICKED_EXECUTIONS => {
+                self.panicked_executions = self.panicked_executions.saturating_add(value);
+            }
+            METRIC_EXECUTION_MS => self.execution_ms = self.execution_ms.saturating_add(value),
             _ => {}
         }
     }
 
     fn finalize(&mut self) {
         self.succeeded = self.processed.saturating_sub(self.failed);
+        if self.successful_executions + self.failed_executions + self.panicked_executions == 0 {
+            self.successful_executions = self.succeeded;
+            self.failed_executions = self.failed;
+            self.panicked_executions = self.panicked;
+        }
     }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JobMetricsPoint {
+    /// Start timestamp for this minute bucket.
     pub timestamp: i64,
+    /// Jobs completed, including successes, failures, and panics. Batch jobs count individually.
     pub processed: u64,
+    /// Jobs completed successfully. Batch jobs count individually.
     pub succeeded: u64,
+    /// Jobs that failed or panicked. Batch jobs count individually.
     pub failed: u64,
+    /// Jobs that panicked. Batch jobs count individually.
     pub panicked: u64,
+    /// Successful worker executions. Batch workers count once per batch.
+    pub successful_executions: u64,
+    /// Worker executions that failed or panicked. Batch workers count once per batch.
+    pub failed_executions: u64,
+    /// Panicked worker executions. Batch workers count once per batch.
+    pub panicked_executions: u64,
+    /// Total duration for successful worker executions. Batch duration counts once per batch.
     pub execution_ms: u64,
 }
 
 impl JobMetricsPoint {
     #[must_use]
     pub fn average_execution_ms(&self) -> f64 {
-        if self.succeeded == 0 {
+        if self.successful_executions == 0 {
             0.0
         } else {
-            self.execution_ms as f64 / self.succeeded as f64
+            self.execution_ms as f64 / self.successful_executions as f64
         }
+    }
+
+    #[must_use]
+    pub fn failed_executions_without_panics(&self) -> u64 {
+        self.failed_executions
+            .saturating_sub(self.panicked_executions)
     }
 
     fn add_metric(&mut self, metric: &str, value: u64) {
         match metric {
-            "p" => self.processed = self.processed.saturating_add(value),
-            "f" => self.failed = self.failed.saturating_add(value),
-            "pn" => self.panicked = self.panicked.saturating_add(value),
-            "ms" => self.execution_ms = self.execution_ms.saturating_add(value),
+            METRIC_PROCESSED_JOBS => self.processed = self.processed.saturating_add(value),
+            METRIC_FAILED_JOBS => self.failed = self.failed.saturating_add(value),
+            METRIC_PANICKED_JOBS => self.panicked = self.panicked.saturating_add(value),
+            METRIC_SUCCESSFUL_EXECUTIONS => {
+                self.successful_executions = self.successful_executions.saturating_add(value);
+            }
+            METRIC_FAILED_EXECUTIONS => {
+                self.failed_executions = self.failed_executions.saturating_add(value);
+            }
+            METRIC_PANICKED_EXECUTIONS => {
+                self.panicked_executions = self.panicked_executions.saturating_add(value);
+            }
+            METRIC_EXECUTION_MS => self.execution_ms = self.execution_ms.saturating_add(value),
             _ => {}
         }
     }
 
     fn finalize(&mut self) {
         self.succeeded = self.processed.saturating_sub(self.failed);
+        if self.successful_executions + self.failed_executions + self.panicked_executions == 0 {
+            self.successful_executions = self.succeeded;
+            self.failed_executions = self.failed;
+            self.panicked_executions = self.panicked;
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobMetricsSummary {
+pub struct WorkerMetricsSummary {
+    /// Worker these metrics belong to.
     pub identity: MetricIdentity,
+    /// Totals for this worker over the queried window.
     pub totals: JobMetricsTotals,
+    /// Per-minute points for this worker over the queried window.
     pub series: Vec<JobMetricsPoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobMetricsSnapshot {
+    /// Inclusive start timestamp for the queried window.
     pub starts_at: i64,
+    /// Inclusive end timestamp for the queried window.
     pub ends_at: i64,
+    /// Number of minute buckets returned.
     pub minutes: usize,
+    /// Totals across all workers in the queried window.
     pub totals: JobMetricsTotals,
+    /// Per-minute totals across all workers in the queried window.
     pub series: Vec<JobMetricsPoint>,
-    pub jobs: Vec<JobMetricsSummary>,
+    /// Per-worker summaries sorted by total execution time descending.
+    pub workers: Vec<WorkerMetricsSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,12 +278,19 @@ pub struct JobMetricsHistogramBucket {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobMetricsDetail {
+    /// Worker these metrics belong to.
     pub identity: MetricIdentity,
+    /// Inclusive start timestamp for the queried window.
     pub starts_at: i64,
+    /// Inclusive end timestamp for the queried window.
     pub ends_at: i64,
+    /// Number of minute buckets returned.
     pub minutes: usize,
+    /// Totals for this worker in the queried window.
     pub totals: JobMetricsTotals,
+    /// Per-minute points for this worker in the queried window.
     pub series: Vec<JobMetricsPoint>,
+    /// Execution-time histogram for successful worker executions.
     pub histogram: Vec<JobMetricsHistogramBucket>,
 }
 
@@ -221,27 +308,31 @@ impl JobMetricsBuffer {
         self.entries.clear();
     }
 
-    pub(crate) fn record(&mut self, result: &JobResult) {
+    pub(crate) fn record(&mut self, result: &WorkerResult) {
         let minute = chrono::Utc::now().timestamp().div_euclid(60);
-        let identity = MetricIdentity::from_result(result);
+        let identity = MetricIdentity::from_worker_result(result);
         let metrics = self.entries.entry((minute, identity)).or_default();
 
-        metrics.processed = metrics.processed.saturating_add(1);
+        metrics.processed = metrics.processed.saturating_add(result.job_count);
 
         match result.kind {
-            JobResultKind::Success => {
-                metrics.execution_ms = metrics.execution_ms.saturating_add(result.duration_ms);
-                let bucket = histogram_bucket_index(result.duration_ms);
+            WorkerResultKind::Success => {
+                metrics.successful_executions = metrics.successful_executions.saturating_add(1);
+                metrics.execution_ms = metrics.execution_ms.saturating_add(result.execution_ms);
+                let bucket = histogram_bucket_index(result.execution_ms);
                 if let Some(count) = metrics.histogram.get_mut(bucket) {
                     *count = count.saturating_add(1);
                 }
             }
-            JobResultKind::Panicked => {
-                metrics.failed = metrics.failed.saturating_add(1);
-                metrics.panicked = metrics.panicked.saturating_add(1);
+            WorkerResultKind::Panicked => {
+                metrics.failed = metrics.failed.saturating_add(result.job_count);
+                metrics.panicked = metrics.panicked.saturating_add(result.job_count);
+                metrics.failed_executions = metrics.failed_executions.saturating_add(1);
+                metrics.panicked_executions = metrics.panicked_executions.saturating_add(1);
             }
-            JobResultKind::Failed => {
-                metrics.failed = metrics.failed.saturating_add(1);
+            WorkerResultKind::Failed => {
+                metrics.failed = metrics.failed.saturating_add(result.job_count);
+                metrics.failed_executions = metrics.failed_executions.saturating_add(1);
             }
         }
     }
@@ -260,6 +351,9 @@ pub(crate) struct PendingJobMetrics {
     pub(crate) processed: u64,
     pub(crate) failed: u64,
     pub(crate) panicked: u64,
+    pub(crate) successful_executions: u64,
+    pub(crate) failed_executions: u64,
+    pub(crate) panicked_executions: u64,
     pub(crate) execution_ms: u64,
     pub(crate) histogram: [u64; HISTOGRAM_BUCKET_COUNT],
 }
@@ -268,10 +362,10 @@ pub(crate) struct PendingJobMetrics {
 pub(crate) struct JobMetricsAggregation {
     pub(crate) totals: JobMetricsTotals,
     pub(crate) series: Vec<JobMetricsPoint>,
-    pub(crate) jobs: Vec<JobMetricsSummary>,
+    pub(crate) workers: Vec<WorkerMetricsSummary>,
 }
 
-struct JobMetricsSummaryBuilder {
+struct WorkerMetricsSummaryBuilder {
     totals: JobMetricsTotals,
     series: Vec<JobMetricsPoint>,
 }
@@ -300,14 +394,14 @@ pub(crate) fn aggregate_counter_hashes(
             .collect(),
         ..JobMetricsAggregation::default()
     };
-    let job_series_template: Vec<JobMetricsPoint> = minutes
+    let worker_series_template: Vec<JobMetricsPoint> = minutes
         .iter()
         .map(|minute| JobMetricsPoint {
             timestamp: minute * 60,
             ..JobMetricsPoint::default()
         })
         .collect();
-    let mut jobs: HashMap<MetricIdentity, JobMetricsSummaryBuilder> = HashMap::new();
+    let mut workers: HashMap<MetricIdentity, WorkerMetricsSummaryBuilder> = HashMap::new();
 
     for (idx, hash) in hashes.into_iter().enumerate() {
         let Some(point) = aggregation.series.get_mut(idx) else {
@@ -325,15 +419,16 @@ pub(crate) fn aggregate_counter_hashes(
             let value = u64::try_from(raw_value).unwrap_or_default();
             point.add_metric(metric, value);
             aggregation.totals.add_metric(metric, value);
-            let job = jobs
-                .entry(identity)
-                .or_insert_with(|| JobMetricsSummaryBuilder {
-                    totals: JobMetricsTotals::default(),
-                    series: job_series_template.clone(),
-                });
-            job.totals.add_metric(metric, value);
-            if let Some(job_point) = job.series.get_mut(idx) {
-                job_point.add_metric(metric, value);
+            let worker_summary =
+                workers
+                    .entry(identity)
+                    .or_insert_with(|| WorkerMetricsSummaryBuilder {
+                        totals: JobMetricsTotals::default(),
+                        series: worker_series_template.clone(),
+                    });
+            worker_summary.totals.add_metric(metric, value);
+            if let Some(worker_point) = worker_summary.series.get_mut(idx) {
+                worker_point.add_metric(metric, value);
             }
         }
 
@@ -341,21 +436,21 @@ pub(crate) fn aggregate_counter_hashes(
     }
 
     aggregation.totals.finalize();
-    aggregation.jobs = jobs
+    aggregation.workers = workers
         .into_iter()
         .map(|(identity, mut summary)| {
             summary.totals.finalize();
             for point in &mut summary.series {
                 point.finalize();
             }
-            JobMetricsSummary {
+            WorkerMetricsSummary {
                 identity,
                 totals: summary.totals,
                 series: summary.series,
             }
         })
         .collect();
-    aggregation.jobs.sort_by(|a, b| {
+    aggregation.workers.sort_by(|a, b| {
         b.totals
             .execution_ms
             .cmp(&a.totals.execution_ms)
@@ -423,7 +518,13 @@ pub(crate) fn histogram_buckets_from_counts(
 fn split_metric_field(field: &str) -> Option<(MetricIdentity, &str)> {
     let (identity_key, metric) = field.rsplit_once('|')?;
     match metric {
-        "p" | "f" | "pn" | "ms" => {
+        METRIC_PROCESSED_JOBS
+        | METRIC_FAILED_JOBS
+        | METRIC_PANICKED_JOBS
+        | METRIC_SUCCESSFUL_EXECUTIONS
+        | METRIC_FAILED_EXECUTIONS
+        | METRIC_PANICKED_EXECUTIONS
+        | METRIC_EXECUTION_MS => {
             MetricIdentity::from_field_key(identity_key).map(|id| (id, metric))
         }
         _ => None,
@@ -475,35 +576,54 @@ mod tests {
         assert_eq!(minutes.len(), MAX_METRIC_MINUTES);
 
         let mut hashes = vec![HashMap::new(); minutes.len()];
-        hashes[0].insert(identity.metric_field("p"), 3);
-        hashes[0].insert(identity.metric_field("f"), 1);
-        hashes[0].insert(identity.metric_field("ms"), 250);
-        hashes[1].insert(other.metric_field("p"), 2);
-        hashes[1].insert(other.metric_field("f"), 1);
-        hashes[1].insert(other.metric_field("pn"), 1);
-        hashes[1].insert(other.metric_field("ms"), 100);
+        hashes[0].insert(identity.metric_field(METRIC_PROCESSED_JOBS), 3);
+        hashes[0].insert(identity.metric_field(METRIC_FAILED_JOBS), 1);
+        hashes[0].insert(identity.metric_field(METRIC_SUCCESSFUL_EXECUTIONS), 2);
+        hashes[0].insert(identity.metric_field(METRIC_FAILED_EXECUTIONS), 1);
+        hashes[0].insert(identity.metric_field(METRIC_EXECUTION_MS), 250);
+        hashes[1].insert(other.metric_field(METRIC_PROCESSED_JOBS), 2);
+        hashes[1].insert(other.metric_field(METRIC_FAILED_JOBS), 1);
+        hashes[1].insert(other.metric_field(METRIC_PANICKED_JOBS), 1);
+        hashes[1].insert(other.metric_field(METRIC_SUCCESSFUL_EXECUTIONS), 1);
+        hashes[1].insert(other.metric_field(METRIC_FAILED_EXECUTIONS), 1);
+        hashes[1].insert(other.metric_field(METRIC_PANICKED_EXECUTIONS), 1);
+        hashes[1].insert(other.metric_field(METRIC_EXECUTION_MS), 100);
 
         let aggregation = aggregate_counter_hashes(&minutes, hashes.clone(), None);
         assert_eq!(aggregation.totals.processed, 5);
         assert_eq!(aggregation.totals.failed, 2);
         assert_eq!(aggregation.totals.panicked, 1);
         assert_eq!(aggregation.totals.succeeded, 3);
+        assert_eq!(aggregation.totals.successful_executions, 3);
+        assert_eq!(aggregation.totals.failed_executions, 2);
+        assert_eq!(aggregation.totals.panicked_executions, 1);
+        assert_eq!(aggregation.totals.failed_executions_without_panics(), 1);
         assert_eq!(aggregation.totals.execution_ms, 350);
-        assert_eq!(aggregation.jobs.len(), 2);
-        assert_eq!(aggregation.jobs[0].series.len(), MAX_METRIC_MINUTES);
-        assert_eq!(aggregation.jobs[0].series[0].processed, 3);
-        assert_eq!(aggregation.jobs[0].series[0].failed, 1);
-        assert_eq!(aggregation.jobs[0].series[0].succeeded, 2);
-        assert_eq!(aggregation.jobs[0].series[0].execution_ms, 250);
-        assert_eq!(aggregation.jobs[1].totals.panicked, 1);
+        assert_eq!(aggregation.workers.len(), 2);
+        assert_eq!(aggregation.workers[0].series.len(), MAX_METRIC_MINUTES);
+        assert_eq!(aggregation.workers[0].series[0].processed, 3);
+        assert_eq!(aggregation.workers[0].series[0].failed, 1);
+        assert_eq!(aggregation.workers[0].series[0].succeeded, 2);
+        assert_eq!(aggregation.workers[0].series[0].successful_executions, 2);
+        assert_eq!(aggregation.workers[0].series[0].execution_ms, 250);
+        assert_eq!(aggregation.workers[1].totals.panicked, 1);
+        assert_eq!(aggregation.workers[1].totals.failed_executions, 1);
+        assert_eq!(aggregation.workers[1].totals.panicked_executions, 1);
+        assert_eq!(
+            aggregation.workers[1]
+                .totals
+                .failed_executions_without_panics(),
+            0
+        );
 
         let filtered = aggregate_counter_hashes(&minutes, hashes, Some(&identity));
         assert_eq!(filtered.totals.processed, 3);
         assert_eq!(filtered.totals.failed, 1);
         assert_eq!(filtered.totals.succeeded, 2);
+        assert_eq!(filtered.totals.successful_executions, 2);
         assert_eq!(filtered.totals.execution_ms, 250);
-        assert_eq!(filtered.jobs.len(), 1);
-        assert_eq!(filtered.jobs[0].series[1].processed, 0);
+        assert_eq!(filtered.workers.len(), 1);
+        assert_eq!(filtered.workers[0].series[1].processed, 0);
     }
 
     #[test]

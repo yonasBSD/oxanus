@@ -286,8 +286,9 @@ impl Storage {
 
     /// Returns Sidekiq-style job execution metrics for a single worker.
     ///
-    /// Successful jobs contribute execution time and histogram data; failed and
-    /// panicked jobs only contribute failure counts.
+    /// Job counters count every job. Execution counters, execution time, and
+    /// histogram data count each worker execution once, so a batch worker
+    /// contributes one execution sample for the whole batch.
     pub async fn job_metrics_for(
         &self,
         identity: &MetricIdentity,

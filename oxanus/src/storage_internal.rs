@@ -13,11 +13,13 @@ use crate::{
     job_envelope::{JobConflictStrategy, JobEnvelope, JobId},
     metrics::{
         HISTOGRAM_BUCKET_COUNT, JobMetricsBuffer, JobMetricsDetail, JobMetricsQuery,
-        JobMetricsSnapshot, METRICS_RETENTION_SECS, MetricIdentity, aggregate_counter_hashes,
-        histogram_bitfield_fetch_args, histogram_bitfield_increment_args,
+        JobMetricsSnapshot, METRIC_EXECUTION_MS, METRIC_FAILED_EXECUTIONS, METRIC_FAILED_JOBS,
+        METRIC_PANICKED_EXECUTIONS, METRIC_PANICKED_JOBS, METRIC_PROCESSED_JOBS,
+        METRIC_SUCCESSFUL_EXECUTIONS, METRICS_RETENTION_SECS, MetricIdentity,
+        aggregate_counter_hashes, histogram_bitfield_fetch_args, histogram_bitfield_increment_args,
         histogram_buckets_from_counts, metric_minutes,
     },
-    result_collector::{JobResult, JobResultKind},
+    result_collector::{WorkerResult, WorkerResultKind},
     stats::{DynamicQueueStats, Process, QueueStats, Stats, StatsGlobal, StatsProcessing},
     storage_keys::StorageKeys,
     storage_types::QueueListOpts,
@@ -929,22 +931,32 @@ impl StorageInternal {
         Ok(values)
     }
 
-    pub async fn update_stats(&self, result: &JobResult) -> Result<(), OxanusError> {
+    pub async fn update_stats(&self, result: &WorkerResult) -> Result<(), OxanusError> {
         let mut redis = self.connection().await?;
-        let queue = result.envelope.queue.clone();
+        let queue = result.queue.clone();
 
+        let count = redis_metric_increment(result.job_count);
         let processed_key = format!("{queue}:processed");
-        let status_key = match result.kind {
-            JobResultKind::Success => format!("{queue}:succeeded"),
-            JobResultKind::Panicked => format!("{queue}:panicked"),
-            JobResultKind::Failed => format!("{queue}:failed"),
-        };
+        let succeeded_key = format!("{queue}:succeeded");
+        let failed_key = format!("{queue}:failed");
+        let panicked_key = format!("{queue}:panicked");
 
-        let _: () = redis::pipe()
-            .hincr(&self.keys.stats, processed_key, 1)
-            .hincr(&self.keys.stats, status_key, 1)
-            .query_async(&mut redis)
-            .await?;
+        let mut pipe = redis::pipe();
+        pipe.hincr(&self.keys.stats, processed_key, count);
+        match result.kind {
+            WorkerResultKind::Success => {
+                pipe.hincr(&self.keys.stats, succeeded_key, count);
+            }
+            WorkerResultKind::Panicked => {
+                pipe.hincr(&self.keys.stats, failed_key, count);
+                pipe.hincr(&self.keys.stats, panicked_key, count);
+            }
+            WorkerResultKind::Failed => {
+                pipe.hincr(&self.keys.stats, failed_key, count);
+            }
+        }
+
+        let _: () = pipe.query_async(&mut redis).await?;
 
         Ok(())
     }
@@ -959,10 +971,13 @@ impl StorageInternal {
 
         for (minute, identity, metrics) in buffer.records() {
             let counter_key = self.metrics_counter_key(minute);
-            let processed_field = identity.metric_field("p");
-            let failed_field = identity.metric_field("f");
-            let panicked_field = identity.metric_field("pn");
-            let execution_ms_field = identity.metric_field("ms");
+            let processed_field = identity.metric_field(METRIC_PROCESSED_JOBS);
+            let failed_field = identity.metric_field(METRIC_FAILED_JOBS);
+            let panicked_field = identity.metric_field(METRIC_PANICKED_JOBS);
+            let successful_executions_field = identity.metric_field(METRIC_SUCCESSFUL_EXECUTIONS);
+            let failed_executions_field = identity.metric_field(METRIC_FAILED_EXECUTIONS);
+            let panicked_executions_field = identity.metric_field(METRIC_PANICKED_EXECUTIONS);
+            let execution_ms_field = identity.metric_field(METRIC_EXECUTION_MS);
 
             if metrics.processed > 0 {
                 pipe.hincr(
@@ -983,6 +998,27 @@ impl StorageInternal {
                     &counter_key,
                     panicked_field,
                     redis_metric_increment(metrics.panicked),
+                );
+            }
+            if metrics.successful_executions > 0 {
+                pipe.hincr(
+                    &counter_key,
+                    successful_executions_field,
+                    redis_metric_increment(metrics.successful_executions),
+                );
+            }
+            if metrics.failed_executions > 0 {
+                pipe.hincr(
+                    &counter_key,
+                    failed_executions_field,
+                    redis_metric_increment(metrics.failed_executions),
+                );
+            }
+            if metrics.panicked_executions > 0 {
+                pipe.hincr(
+                    &counter_key,
+                    panicked_executions_field,
+                    redis_metric_increment(metrics.panicked_executions),
                 );
             }
             if metrics.execution_ms > 0 {
@@ -1029,7 +1065,7 @@ impl StorageInternal {
             minutes: minutes.len(),
             totals: aggregation.totals,
             series: aggregation.series,
-            jobs: aggregation.jobs,
+            workers: aggregation.workers,
         })
     }
 
@@ -1448,10 +1484,13 @@ impl StorageInternal {
         }
 
         let fields = [
-            identity.metric_field("p"),
-            identity.metric_field("f"),
-            identity.metric_field("pn"),
-            identity.metric_field("ms"),
+            identity.metric_field(METRIC_PROCESSED_JOBS),
+            identity.metric_field(METRIC_FAILED_JOBS),
+            identity.metric_field(METRIC_PANICKED_JOBS),
+            identity.metric_field(METRIC_SUCCESSFUL_EXECUTIONS),
+            identity.metric_field(METRIC_FAILED_EXECUTIONS),
+            identity.metric_field(METRIC_PANICKED_EXECUTIONS),
+            identity.metric_field(METRIC_EXECUTION_MS),
         ];
         let mut pipe = redis::pipe();
         for minute in minutes {

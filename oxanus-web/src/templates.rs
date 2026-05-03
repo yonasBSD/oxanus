@@ -137,12 +137,12 @@ impl MetricsTemplate {
             .collect();
         let series: Vec<serde_json::Value> = self
             .metrics
-            .jobs
+            .workers
             .iter()
-            .map(|job| {
-                let data: Vec<f64> = job.series.iter().map(&value).collect();
+            .map(|worker| {
+                let data: Vec<f64> = worker.series.iter().map(&value).collect();
                 serde_json::json!({
-                    "label": metric_identity_label(&job.identity),
+                    "label": metric_identity_label(&worker.identity),
                     "data": data,
                 })
             })
@@ -202,22 +202,22 @@ impl MetricDetailTemplate {
             .metrics
             .series
             .iter()
-            .map(|point| point.succeeded)
+            .map(|point| point.successful_executions)
             .collect();
-        let failed: Vec<u64> = self
+        let failed_without_panics: Vec<u64> = self
             .metrics
             .series
             .iter()
-            .map(|point| point.failed.saturating_sub(point.panicked))
+            .map(oxanus::JobMetricsPoint::failed_executions_without_panics)
             .collect();
         let panicked: Vec<u64> = self
             .metrics
             .series
             .iter()
-            .map(|point| point.panicked)
+            .map(|point| point.panicked_executions)
             .collect();
 
-        serde_json::json!([timestamps, succeeded, failed, panicked]).to_string()
+        serde_json::json!([timestamps, succeeded, failed_without_panics, panicked]).to_string()
     }
 
     pub fn max_histogram_count(&self) -> u64 {
