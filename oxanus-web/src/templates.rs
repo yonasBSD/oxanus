@@ -81,6 +81,7 @@ pub(crate) struct QueuesTemplate {
     pub active_tab: &'static str,
     pub stats: oxanus::Stats,
     pub concurrency_map: HashMap<String, usize>,
+    pub queue_lengths: oxanus::QueueLengthMetricsSnapshot,
     pub sort: String,
     pub dir: String,
 }
@@ -106,31 +107,18 @@ impl QueuesTemplate {
         }
     }
 
+    pub fn sort_href(&self, col: &str) -> String {
+        format!(
+            "{}/queues?sort={}&dir={}&minutes={}",
+            self.base_path,
+            col,
+            self.next_dir(col),
+            self.queue_lengths.minutes
+        )
+    }
+
     pub fn concurrency_for(&self, key: &str) -> String {
         concurrency_for(&self.concurrency_map, key)
-    }
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "metrics.html")]
-pub(crate) struct MetricsTemplate {
-    pub base_path: String,
-    pub active_tab: &'static str,
-    pub metrics: oxanus::JobMetricsSnapshot,
-    pub queue_lengths: oxanus::QueueLengthMetricsSnapshot,
-}
-
-impl MetricsTemplate {
-    pub fn metric_identity_label(&self, identity: &oxanus::MetricIdentity) -> String {
-        metric_identity_label(identity)
-    }
-
-    pub fn execution_chart_data_json(&self) -> String {
-        self.summary_chart_data_json(|point| point.execution_ms as f64 / 1000.0)
-    }
-
-    pub fn processed_chart_data_json(&self) -> String {
-        self.summary_chart_data_json(|point| point.processed as f64)
     }
 
     pub fn queue_length_chart_data_json(&self) -> String {
@@ -160,6 +148,120 @@ impl MetricsTemplate {
             "series": series,
         })
         .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueuesTemplate;
+    use std::collections::HashMap;
+
+    fn queues_template(queue_lengths: oxanus::QueueLengthMetricsSnapshot) -> QueuesTemplate {
+        QueuesTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/queues",
+            stats: oxanus::Stats {
+                global: oxanus::StatsGlobal {
+                    jobs: 0,
+                    enqueued: 0,
+                    processed: 0,
+                    failed: 0,
+                    dead: 0,
+                    scheduled: 0,
+                    retries: 0,
+                    latency_s_max: 0.0,
+                },
+                processes: Vec::new(),
+                processing: Vec::new(),
+                queues: Vec::new(),
+            },
+            concurrency_map: HashMap::new(),
+            queue_lengths,
+            sort: "key".to_string(),
+            dir: "asc".to_string(),
+        }
+    }
+
+    #[test]
+    fn queue_sort_href_preserves_chart_window() {
+        let template = queues_template(oxanus::QueueLengthMetricsSnapshot {
+            starts_at: 0,
+            ends_at: 0,
+            minutes: 120,
+            queues: Vec::new(),
+        });
+
+        assert_eq!(
+            template.sort_href("enqueued"),
+            "/admin/queues?sort=enqueued&dir=desc&minutes=120"
+        );
+    }
+
+    #[test]
+    fn queue_length_chart_data_json_uses_window_when_no_queues_exist() {
+        let template = queues_template(oxanus::QueueLengthMetricsSnapshot {
+            starts_at: 60,
+            ends_at: 120,
+            minutes: 2,
+            queues: Vec::new(),
+        });
+        let payload: serde_json::Value =
+            serde_json::from_str(&template.queue_length_chart_data_json()).unwrap();
+
+        assert_eq!(payload["timestamps"], serde_json::json!([60, 120]));
+        assert_eq!(payload["series"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn queue_length_chart_data_json_serializes_queue_series() {
+        let template = queues_template(oxanus::QueueLengthMetricsSnapshot {
+            starts_at: 60,
+            ends_at: 120,
+            minutes: 2,
+            queues: vec![oxanus::QueueLengthMetricsSeries {
+                queue: "default".to_string(),
+                series: vec![
+                    oxanus::QueueLengthMetricsPoint {
+                        timestamp: 60,
+                        enqueued: 2,
+                    },
+                    oxanus::QueueLengthMetricsPoint {
+                        timestamp: 120,
+                        enqueued: 5,
+                    },
+                ],
+            }],
+        });
+        let payload: serde_json::Value =
+            serde_json::from_str(&template.queue_length_chart_data_json()).unwrap();
+
+        assert_eq!(payload["timestamps"], serde_json::json!([60, 120]));
+        assert_eq!(
+            payload["series"],
+            serde_json::json!([{ "label": "default", "data": [2, 5] }])
+        );
+    }
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "metrics.html")]
+pub(crate) struct MetricsTemplate {
+    pub base_path: String,
+    pub active_tab: &'static str,
+    pub metrics: oxanus::JobMetricsSnapshot,
+}
+
+impl MetricsTemplate {
+    pub fn metric_identity_label(&self, identity: &oxanus::MetricIdentity) -> String {
+        metric_identity_label(identity)
+    }
+
+    pub fn execution_chart_data_json(&self) -> String {
+        self.summary_chart_data_json(|point| point.execution_ms as f64 / 1000.0)
+    }
+
+    pub fn processed_chart_data_json(&self) -> String {
+        self.summary_chart_data_json(|point| point.processed as f64)
     }
 
     fn summary_chart_data_json(&self, value: impl Fn(&oxanus::JobMetricsPoint) -> f64) -> String {
