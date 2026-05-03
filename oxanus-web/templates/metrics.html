@@ -199,7 +199,8 @@
                 });
             }
 
-            function buildTooltip(chartEl, payload, formatter) {
+            function buildTooltip(chartEl, payload, formatter, options) {
+                options = options || {};
                 var tooltip = document.createElement('div');
                 tooltip.className = 'chart-tooltip hidden';
                 chartEl.appendChild(tooltip);
@@ -225,7 +226,9 @@
                     time.append(formatTime(payload.timestamps[idx]));
                     tooltip.appendChild(time);
 
-                    sortedSeriesRows(payload, idx).forEach(function (entry) {
+                    sortedSeriesRows(payload, idx).filter(function (entry) {
+                        return options.includeZeroValues !== false || entry.value !== 0;
+                    }).forEach(function (entry) {
                         var row = document.createElement('div');
                         var label = document.createElement('span');
                         label.className = 'chart-tooltip-label';
@@ -249,7 +252,7 @@
                 };
             }
 
-            function renderChart(chartId, payload, valueFormatter) {
+            function renderChart(chartId, payload, valueFormatter, options) {
                 var chartEl = document.getElementById(chartId);
                 if (!chartEl) {
                     return;
@@ -294,7 +297,7 @@
                         };
                     })),
                     hooks: {
-                        setCursor: [buildTooltip(chartEl, payload, valueFormatter)]
+                        setCursor: [buildTooltip(chartEl, payload, valueFormatter, options)]
                     }
                 }, data, chartEl);
             }
@@ -430,7 +433,9 @@
                     time.append(formatTime(timestamps[idx]));
                     tooltip.appendChild(time);
 
-                    sortedSeriesRows(payload, idx).forEach(function (entry) {
+                    sortedSeriesRows(payload, idx).filter(function (entry) {
+                        return entry.value !== 0;
+                    }).forEach(function (entry) {
                         var row = document.createElement('div');
                         var label = document.createElement('span');
                         label.className = 'chart-tooltip-label';
@@ -441,13 +446,15 @@
                         tooltip.appendChild(row);
                     });
 
-                    var total = document.createElement('div');
-                    var totalLabel = document.createElement('span');
-                    totalLabel.className = 'chart-tooltip-label';
-                    totalLabel.textContent = 'Total: ';
-                    total.appendChild(totalLabel);
-                    total.append(formatCount(totals[idx] || 0));
-                    tooltip.appendChild(total);
+                    if ((totals[idx] || 0) !== 0) {
+                        var total = document.createElement('div');
+                        var totalLabel = document.createElement('span');
+                        totalLabel.className = 'chart-tooltip-label';
+                        totalLabel.textContent = 'Total: ';
+                        total.appendChild(totalLabel);
+                        total.append(formatCount(totals[idx] || 0));
+                        tooltip.appendChild(total);
+                    }
                     tooltip.classList.remove('hidden');
 
                     var x = event.clientX - rect.left;
@@ -468,12 +475,14 @@
             renderChart(
                 'queue-length-chart',
                 {{ self.queue_length_chart_data_json()|safe }},
-                formatCount
+                formatCount,
+                { includeZeroValues: false }
             );
             renderChart(
                 'execution-chart',
                 {{ self.execution_chart_data_json()|safe }},
-                formatSeconds
+                formatSeconds,
+                { includeZeroValues: false }
             );
             renderStackedProcessedChart(
                 'processed-chart',
