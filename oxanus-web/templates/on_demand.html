@@ -23,12 +23,12 @@
         {% include "_tabs.html" %}
 
         {% if scheduled %}
-        <div class="mb-4 rounded border border-green-800 bg-green-950/40 px-4 py-3 text-sm text-green-300">
+        <div data-auto-dismiss-notice class="mb-4 rounded border border-green-800 bg-green-950/40 px-4 py-3 text-sm text-green-300">
             Job scheduled.
         </div>
         {% endif %}
         {% if invalid_json %}
-        <div class="mb-4 rounded border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300">
+        <div data-auto-dismiss-notice class="mb-4 rounded border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300">
             Invalid JSON.
         </div>
         {% endif %}
@@ -83,5 +83,6 @@
         </div>
         {% endif %}
     </div>
+    {% include "_auto_dismiss_notices.html" %}
 </body>
 </html>

@@ -102,7 +102,10 @@ pub(crate) async fn metric_detail(
     })
 }
 
-pub(crate) async fn cron_jobs(Extension(state): Extension<OxanusWebState>) -> CronTemplate {
+pub(crate) async fn cron_jobs(
+    Extension(state): Extension<OxanusWebState>,
+    Query(params): Query<CronParams>,
+) -> CronTemplate {
     let now = chrono::Utc::now();
     let rows = build_cron_rows(&state.catalog.cron_workers, &now);
     let total = state.catalog.cron_workers.len();
@@ -112,7 +115,22 @@ pub(crate) async fn cron_jobs(Extension(state): Extension<OxanusWebState>) -> Cr
         active_tab: "/cron",
         rows,
         total,
+        enqueued: params.enqueued.as_deref() == Some("1"),
     }
+}
+
+pub(crate) async fn enqueue_cron_job(
+    Extension(state): Extension<OxanusWebState>,
+    Form(form): Form<CronEnqueueJobForm>,
+) -> Result<Redirect, OxanusWebError> {
+    let envelope = cron_envelope_from_form(&state.catalog, &form)?;
+
+    state.storage.enqueue_envelope(envelope).await?;
+
+    Ok(Redirect::to(&format!(
+        "{}/cron?enqueued=1",
+        state.base_path
+    )))
 }
 
 pub(crate) async fn on_demand_jobs(
@@ -328,38 +346,13 @@ pub(crate) async fn enqueue_job(
     Extension(state): Extension<OxanusWebState>,
     Form(form): Form<EnqueueJobForm>,
 ) -> Result<Redirect, OxanusWebError> {
-    let now = chrono::Utc::now().timestamp_micros();
-    let id = uuid::Uuid::new_v4().to_string();
-    let args: serde_json::Value =
-        serde_json::from_str(&form.args).map_err(oxanus::OxanusError::from)?;
-    let job_state: Option<serde_json::Value> = match form.state.as_deref() {
-        Some(s) if !s.is_empty() => {
-            Some(serde_json::from_str(s).map_err(oxanus::OxanusError::from)?)
-        }
-        _ => None,
-    };
-
-    let envelope = oxanus::JobEnvelope {
-        id: id.clone(),
-        queue: form.queue.clone(),
-        job: oxanus::JobData {
-            name: form.name,
-            args,
-        },
-        meta: oxanus::JobMeta {
-            id,
-            retries: 0,
-            unique: false,
-            on_conflict: None,
-            created_at: now,
-            scheduled_at: now,
-            started_at: None,
-            state: job_state,
-            resurrect: true,
-            error: None,
-            throttle_cost: None,
-        },
-    };
+    let envelope = immediate_envelope(
+        form.queue,
+        form.name,
+        parse_json(&form.args)?,
+        parse_optional_json(form.state.as_deref())?,
+        true,
+    );
 
     state.storage.enqueue_envelope(envelope).await?;
 
@@ -427,6 +420,11 @@ pub(crate) struct EnqueueJobForm {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct CronEnqueueJobForm {
+    name: String,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct OnDemandEnqueueJobForm {
     queue: String,
     name: String,
@@ -439,6 +437,12 @@ pub(crate) struct OnDemandParams {
     scheduled: Option<String>,
     #[serde(default)]
     invalid_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CronParams {
+    #[serde(default)]
+    enqueued: Option<String>,
 }
 
 fn list_opts(page: usize) -> oxanus::QueueListOpts {
@@ -521,10 +525,72 @@ fn on_demand_envelope_from_form(
                 form.name
             ))
         })?;
-    let args: serde_json::Value =
-        serde_json::from_str(&form.args).map_err(oxanus::OxanusError::from)?;
 
-    job.enqueue_envelope(form.queue.clone(), args)
+    job.enqueue_envelope(form.queue.clone(), parse_json(&form.args)?)
+}
+
+fn cron_envelope_from_form(
+    catalog: &oxanus::Catalog,
+    form: &CronEnqueueJobForm,
+) -> Result<oxanus::JobEnvelope, oxanus::OxanusError> {
+    let job = catalog
+        .cron_workers
+        .iter()
+        .find(|job| job.name == form.name)
+        .ok_or_else(|| {
+            oxanus::OxanusError::GenericError(format!("Cron job {} is not registered", form.name))
+        })?;
+
+    Ok(immediate_envelope(
+        job.queue_key.clone(),
+        job.name.clone(),
+        serde_json::json!({}),
+        None,
+        job.resurrect,
+    ))
+}
+
+fn parse_json(input: &str) -> Result<serde_json::Value, oxanus::OxanusError> {
+    serde_json::from_str(input).map_err(oxanus::OxanusError::from)
+}
+
+fn parse_optional_json(
+    input: Option<&str>,
+) -> Result<Option<serde_json::Value>, oxanus::OxanusError> {
+    input
+        .filter(|value| !value.is_empty())
+        .map(parse_json)
+        .transpose()
+}
+
+fn immediate_envelope(
+    queue: String,
+    name: String,
+    args: serde_json::Value,
+    state: Option<serde_json::Value>,
+    resurrect: bool,
+) -> oxanus::JobEnvelope {
+    let now = chrono::Utc::now().timestamp_micros();
+    let id = uuid::Uuid::new_v4().to_string();
+
+    oxanus::JobEnvelope {
+        id: id.clone(),
+        queue,
+        job: oxanus::JobData { name, args },
+        meta: oxanus::JobMeta {
+            id,
+            retries: 0,
+            unique: false,
+            on_conflict: None,
+            created_at: now,
+            scheduled_at: now,
+            started_at: None,
+            state,
+            resurrect,
+            error: None,
+            throttle_cost: None,
+        },
+    }
 }
 
 struct TypeTreeNode<T> {
@@ -572,6 +638,7 @@ fn build_cron_rows(
             &mut root,
             &group_segments,
             CronWorkerView {
+                name: cw.name.clone(),
                 short_name: leaf_name,
                 schedule: cw.schedule.to_string(),
                 queue_key: cw.queue_key.clone(),
@@ -663,8 +730,8 @@ fn build_on_demand_queue_views(queues: &[oxanus::QueueInfo]) -> Vec<OnDemandQueu
 #[cfg(test)]
 mod tests {
     use super::{
-        OnDemandEnqueueJobForm, build_on_demand_queue_views, enqueue_on_demand_job,
-        on_demand_envelope_from_form, sort_queues,
+        CronEnqueueJobForm, OnDemandEnqueueJobForm, build_on_demand_queue_views,
+        cron_envelope_from_form, enqueue_on_demand_job, on_demand_envelope_from_form, sort_queues,
     };
     use crate::OxanusWebState;
     use axum::Form;
@@ -674,6 +741,8 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::io::Error as WorkerError;
+
+    const CRON_WORKER_NAME: &str = "test::CleanupCronWorker";
 
     #[derive(Serialize)]
     struct StaticQueue;
@@ -736,6 +805,20 @@ mod tests {
             .catalog()
     }
 
+    fn cron_catalog() -> oxanus::Catalog {
+        oxanus::Catalog {
+            workers: Vec::new(),
+            cron_workers: vec![oxanus::CronWorkerInfo {
+                name: CRON_WORKER_NAME.to_string(),
+                schedule: "*/5 * * * * *".parse().unwrap(),
+                queue_key: "default".to_string(),
+                resurrect: false,
+            }],
+            queues: Vec::new(),
+            on_demand_jobs: Vec::new(),
+        }
+    }
+
     fn queue_with_eta(key: &str, eta_s: Option<f64>) -> oxanus::QueueStats {
         oxanus::QueueStats {
             key: key.to_string(),
@@ -794,6 +877,41 @@ mod tests {
             .map(|queue| queue.key.as_str())
             .collect::<Vec<_>>();
         assert_eq!(keys, vec!["never", "slow", "fast"]);
+    }
+
+    #[test]
+    fn cron_form_rejects_unknown_jobs() {
+        let catalog = cron_catalog();
+
+        let err = cron_envelope_from_form(
+            &catalog,
+            &CronEnqueueJobForm {
+                name: "missing".to_string(),
+            },
+        )
+        .expect_err("unknown cron jobs should not be accepted");
+
+        assert!(matches!(err, oxanus::OxanusError::GenericError(_)));
+    }
+
+    #[test]
+    fn cron_form_builds_immediate_envelope() {
+        let catalog = cron_catalog();
+        let envelope = cron_envelope_from_form(
+            &catalog,
+            &CronEnqueueJobForm {
+                name: CRON_WORKER_NAME.to_string(),
+            },
+        )
+        .expect("valid cron form should build an envelope");
+
+        assert_eq!(envelope.queue, "default");
+        assert_eq!(envelope.job.name, CRON_WORKER_NAME);
+        assert_eq!(envelope.job.args, serde_json::json!({}));
+        assert!(!envelope.meta.unique);
+        assert!(envelope.meta.on_conflict.is_none());
+        assert!(!envelope.meta.resurrect);
+        assert_eq!(envelope.meta.scheduled_at, envelope.meta.created_at);
     }
 
     #[test]

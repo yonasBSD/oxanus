@@ -94,6 +94,32 @@ mod demo {
             }
         }
     }
+
+    pub(crate) mod maintenance {
+        pub(crate) mod cleanup {
+            use crate::{ComponentRegistry, DefaultQueue, WorkerContext, WorkerError};
+            use serde::{Deserialize, Serialize};
+
+            #[derive(Debug, Serialize, Deserialize, oxanus::Job)]
+            pub(crate) struct CleanupExpiredSessionsJob {}
+
+            #[derive(oxanus::Worker)]
+            #[oxanus(max_retries = 0)]
+            #[oxanus(cron(schedule = "*/30 * * * * *", queue = DefaultQueue))]
+            struct CleanupExpiredSessionsWorker;
+
+            impl CleanupExpiredSessionsWorker {
+                async fn process(
+                    &self,
+                    _job: CleanupExpiredSessionsJob,
+                    _ctx: &oxanus::JobContext,
+                ) -> Result<(), WorkerError> {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    Ok(())
+                }
+            }
+        }
+    }
 }
 
 use demo::billing::invoices::GenerateInvoiceJob;
