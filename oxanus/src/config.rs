@@ -185,6 +185,7 @@ impl<DT, ET> Config<DT, ET> {
                 name: name.clone(),
                 schedule: cron_job.schedule.clone(),
                 queue_key: cron_job.queue_key.clone(),
+                resurrect: cron_job.resurrect,
             })
             .collect();
         cron_workers.sort_by(|a, b| a.name.cmp(&b.name));

@@ -84,4 +84,6 @@ pub struct CronWorkerInfo {
     pub schedule: cron::Schedule,
     /// The queue key this worker runs on.
     pub queue_key: String,
+    /// Whether jobs for this worker should be resurrected if a process dies.
+    pub resurrect: bool,
 }

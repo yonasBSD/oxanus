@@ -395,6 +395,7 @@ impl CronRow {
 
 #[derive(Clone)]
 pub(crate) struct CronWorkerView {
+    pub name: String,
     pub short_name: String,
     pub schedule: String,
     pub queue_key: String,
@@ -408,6 +409,7 @@ pub(crate) struct CronTemplate {
     pub active_tab: &'static str,
     pub rows: Vec<CronRow>,
     pub total: usize,
+    pub enqueued: bool,
 }
 
 #[derive(Clone)]
@@ -551,6 +553,55 @@ impl GlobalJobsTemplate {
 }
 
 #[cfg(test)]
+mod cron_tests {
+    use super::{CronRow, CronTemplate, CronWorkerView};
+    use askama::Template;
+
+    #[test]
+    fn cron_template_renders_enqueue_now_form_at_end_of_row() {
+        let template = CronTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/cron",
+            rows: vec![CronRow::Worker {
+                view: CronWorkerView {
+                    name: "crate::workers::EmailCronWorker".to_string(),
+                    short_name: "EmailCronWorker".to_string(),
+                    schedule: "0 * * * * *".to_string(),
+                    queue_key: "default".to_string(),
+                    next_run_micros: None,
+                },
+                depth: 0,
+            }],
+            total: 1,
+            enqueued: false,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("<th class=\"pb-3 text-right\">Action</th>"));
+        assert!(rendered.contains("action=\"/admin/cron/enqueue\""));
+        assert!(rendered.contains("name=\"name\" value=\"crate::workers::EmailCronWorker\""));
+        assert!(rendered.contains("Enqueue now"));
+    }
+
+    #[test]
+    fn cron_template_shows_notice_after_successful_enqueue() {
+        let template = CronTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/cron",
+            rows: Vec::new(),
+            total: 0,
+            enqueued: true,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("Cron job enqueued."));
+        assert!(rendered.contains("data-auto-dismiss-notice"));
+    }
+}
+
+#[cfg(test)]
 mod on_demand_tests {
     use super::{OnDemandJobView, OnDemandQueueView, OnDemandRow, OnDemandTemplate};
     use askama::Template;
@@ -651,6 +702,7 @@ mod on_demand_tests {
         let rendered = template.render().unwrap();
 
         assert!(rendered.contains("Job scheduled."));
+        assert!(rendered.contains("data-auto-dismiss-notice"));
     }
 
     #[test]
@@ -668,5 +720,6 @@ mod on_demand_tests {
         let rendered = template.render().unwrap();
 
         assert!(rendered.contains("Invalid JSON."));
+        assert!(rendered.contains("data-auto-dismiss-notice"));
     }
 }
