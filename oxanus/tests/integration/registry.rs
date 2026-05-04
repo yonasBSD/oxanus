@@ -12,6 +12,7 @@ struct QueueTwo;
 
 #[derive(Debug, Serialize, Deserialize, oxanus::Job)]
 #[oxanus(worker = WorkerCounter)]
+#[oxanus(on_demand = true)]
 pub struct WorkerCounterJob {
     pub key: String,
 }
@@ -75,6 +76,10 @@ pub async fn test_registry() -> TestResult {
     assert!(config.has_registered_queue::<QueueTwo>());
     assert!(config.has_registered_worker_type::<WorkerCounter>());
     assert!(config.has_registered_cron_worker_type::<CronWorkerCounter>());
+    assert!(config.catalog().on_demand_jobs.iter().any(|job| {
+        job.name == std::any::type_name::<WorkerCounter>()
+            && job.args_template == serde_json::json!({ "key": "" })
+    }));
 
     storage
         .enqueue(

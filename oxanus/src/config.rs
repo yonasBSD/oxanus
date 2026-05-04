@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Storage;
 use crate::queue::{Queue, QueueConfig};
-use crate::storage_types::{Catalog, CronWorkerInfo, QueueInfo, QueueThrottleInfo, WorkerInfo};
+use crate::storage_types::{
+    Catalog, CronWorkerInfo, OnDemandJobInfo, QueueInfo, QueueThrottleInfo, WorkerInfo,
+};
 use crate::worker::{FromContext, Job, Worker};
 use crate::worker_registry::{self, WorkerConfig, WorkerConfigKind, WorkerRegistry};
 
@@ -76,6 +78,12 @@ impl<DT, ET> Config<DT, ET> {
         let batch_factory = worker_registry::job_batch_factory::<W, A, DT, ET>;
         let kind = <W as Worker<A>>::to_config();
         let batch_config = W::batch_config();
+        let on_demand = A::on_demand_args_template().map(|args_template| {
+            worker_registry::OnDemandJobRegistration {
+                args_template,
+                enqueue_factory: worker_registry::job_envelope_factory::<A>,
+            }
+        });
 
         if let WorkerConfigKind::Cron { .. } = &kind {
             assert!(
@@ -94,6 +102,7 @@ impl<DT, ET> Config<DT, ET> {
             factory,
             batch_factory,
             batch_config,
+            on_demand,
             kind,
         });
         self
@@ -212,10 +221,23 @@ impl<DT, ET> Config<DT, ET> {
             .collect();
         queues.sort_by(|a, b| a.key.cmp(&b.key));
 
+        let mut on_demand_jobs: Vec<OnDemandJobInfo> = self
+            .registry
+            .on_demand_jobs
+            .iter()
+            .map(|(name, registration)| OnDemandJobInfo {
+                name: name.clone(),
+                args_template: registration.args_template.clone(),
+                enqueue_factory: registration.enqueue_factory,
+            })
+            .collect();
+        on_demand_jobs.sort_by(|a, b| a.name.cmp(&b.name));
+
         Catalog {
             workers,
             cron_workers,
             queues,
+            on_demand_jobs,
         }
     }
 }
@@ -239,4 +261,173 @@ async fn default_shutdown_signal() -> Result<(), std::io::Error> {
 fn no_signal() -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send + Sync + 'static>>
 {
     Box::pin(async move { Ok(()) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate as oxanus;
+    use serde::{Deserialize, Serialize};
+    use std::io::Error as WorkerError;
+
+    macro_rules! impl_test_worker {
+        ($worker:ty, $job:ty) => {
+            impl oxanus::FromContext<()> for $worker {
+                fn from_context(_ctx: &()) -> Self {
+                    Self
+                }
+            }
+
+            #[async_trait::async_trait]
+            impl oxanus::Worker<$job> for $worker {
+                type Error = WorkerError;
+
+                async fn run_batch(
+                    &self,
+                    _jobs: Vec<oxanus::BatchItem<$job>>,
+                ) -> Result<(), Self::Error> {
+                    Ok(())
+                }
+            }
+        };
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct PlainJob {
+        value: String,
+    }
+
+    struct PlainWorker;
+
+    impl oxanus::Job for PlainJob {
+        fn worker_name() -> &'static str {
+            std::any::type_name::<PlainWorker>()
+        }
+    }
+
+    impl_test_worker!(PlainWorker, PlainJob);
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct ZetaJob {
+        value: String,
+    }
+
+    struct ZetaWorker;
+
+    impl oxanus::Job for ZetaJob {
+        fn worker_name() -> &'static str {
+            std::any::type_name::<ZetaWorker>()
+        }
+
+        fn on_demand_args_template() -> Option<serde_json::Value> {
+            Some(serde_json::json!({
+                "value": "",
+            }))
+        }
+    }
+
+    impl_test_worker!(ZetaWorker, ZetaJob);
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct AlphaJob {
+        id: u64,
+        cost: u64,
+    }
+
+    impl AlphaJob {
+        fn throttle_cost(&self) -> Option<u64> {
+            Some(self.cost)
+        }
+    }
+
+    struct AlphaWorker;
+
+    impl oxanus::Job for AlphaJob {
+        fn worker_name() -> &'static str {
+            std::any::type_name::<AlphaWorker>()
+        }
+
+        fn unique_id(&self) -> Option<String> {
+            Some(format!("alpha_{}", self.id))
+        }
+
+        fn on_conflict(&self) -> oxanus::JobConflictStrategy {
+            oxanus::JobConflictStrategy::Replace
+        }
+
+        fn throttle_cost(&self) -> Option<u64> {
+            Self::throttle_cost(self)
+        }
+
+        fn on_demand_args_template() -> Option<serde_json::Value> {
+            Some(serde_json::json!({
+                "id": 0,
+                "cost": 0,
+            }))
+        }
+    }
+
+    impl_test_worker!(AlphaWorker, AlphaJob);
+
+    fn test_storage() -> Storage {
+        Storage::builder()
+            .build_from_redis_url("redis://127.0.0.1/0")
+            .expect("test storage pool should build")
+    }
+
+    #[test]
+    fn catalog_lists_only_on_demand_jobs_sorted() {
+        let storage = test_storage();
+        let config = Config::<(), WorkerError>::new(&storage)
+            .register_worker::<PlainWorker, PlainJob>()
+            .register_worker::<ZetaWorker, ZetaJob>()
+            .register_worker::<AlphaWorker, AlphaJob>();
+
+        let names = config
+            .catalog()
+            .on_demand_jobs
+            .into_iter()
+            .map(|job| job.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                std::any::type_name::<AlphaWorker>().to_string(),
+                std::any::type_name::<ZetaWorker>().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn on_demand_factory_preserves_job_hooks() {
+        let storage = test_storage();
+        let catalog = Config::<(), WorkerError>::new(&storage)
+            .register_worker::<AlphaWorker, AlphaJob>()
+            .catalog();
+        let job = catalog
+            .on_demand_jobs
+            .iter()
+            .find(|job| job.name == std::any::type_name::<AlphaWorker>())
+            .expect("alpha worker should be registered as on-demand");
+
+        let envelope = job
+            .enqueue_envelope(
+                "manual".to_string(),
+                serde_json::json!({
+                    "id": 7,
+                    "cost": 3,
+                }),
+            )
+            .expect("on-demand factory should build typed envelope");
+
+        assert_eq!(envelope.queue, "manual");
+        assert_eq!(envelope.id, format!("{}/alpha_7", AlphaJob::worker_name()));
+        assert!(envelope.meta.unique);
+        assert_eq!(
+            envelope.meta.on_conflict,
+            Some(oxanus::JobConflictStrategy::Replace)
+        );
+        assert_eq!(envelope.meta.throttle_cost, Some(3));
+    }
 }

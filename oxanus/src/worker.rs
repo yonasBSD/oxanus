@@ -46,6 +46,13 @@ pub trait Job: Send + serde::Serialize {
     fn throttle_cost(&self) -> Option<u64> {
         None
     }
+
+    fn on_demand_args_template() -> Option<serde_json::Value>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -625,5 +632,88 @@ mod tests {
         }
 
         assert!(<DefaultResurrectJob as oxanus::Job>::should_resurrect());
+    }
+
+    #[test]
+    fn test_on_demand_args_template_macro() {
+        use crate as oxanus;
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        struct DefaultOffWorker;
+
+        #[derive(Debug, Serialize, Deserialize, oxanus::Job)]
+        #[oxanus(worker = DefaultOffWorker)]
+        struct DefaultOffJob {
+            value: String,
+        }
+
+        assert_eq!(DefaultOffJob::on_demand_args_template(), None);
+
+        #[derive(Debug, Serialize, Deserialize)]
+        struct NestedTask {
+            name: String,
+        }
+
+        struct NamedOnDemandWorker;
+
+        #[derive(Debug, Serialize, Deserialize, oxanus::Job)]
+        #[oxanus(worker = NamedOnDemandWorker)]
+        #[oxanus(on_demand = true)]
+        #[serde(rename_all = "camelCase")]
+        struct NamedOnDemandJob {
+            name: String,
+            count: u32,
+            enabled: bool,
+            ratio: f64,
+            optional: Option<String>,
+            tags: Vec<String>,
+            labels: HashMap<String, String>,
+            nested: NestedTask,
+            #[serde(rename = "custom_id")]
+            renamed_id: u64,
+            #[serde(skip)]
+            #[allow(dead_code)]
+            skipped: String,
+        }
+
+        assert_eq!(
+            NamedOnDemandJob::on_demand_args_template(),
+            Some(json!({
+                "name": "",
+                "count": 0,
+                "enabled": false,
+                "ratio": 0.0,
+                "optional": null,
+                "tags": [],
+                "labels": {},
+                "nested": {},
+                "custom_id": 0,
+            }))
+        );
+
+        struct TupleOnDemandWorker;
+
+        #[derive(Debug, Serialize, Deserialize, oxanus::Job)]
+        #[oxanus(worker = TupleOnDemandWorker)]
+        #[oxanus(on_demand = true)]
+        struct TupleOnDemandJob(String, u64, Option<bool>, Vec<String>);
+
+        assert_eq!(
+            TupleOnDemandJob::on_demand_args_template(),
+            Some(json!(["", 0, null, []]))
+        );
+
+        struct UnitOnDemandWorker;
+
+        #[derive(Debug, Serialize, Deserialize, oxanus::Job)]
+        #[oxanus(worker = UnitOnDemandWorker)]
+        #[oxanus(on_demand = true)]
+        struct UnitOnDemandJob;
+
+        assert_eq!(
+            UnitOnDemandJob::on_demand_args_template(),
+            Some(serde_json::Value::Null)
+        );
     }
 }

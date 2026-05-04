@@ -788,6 +788,7 @@ mod tests {
                 2,
                 std::time::Duration::from_millis(100),
             )),
+            on_demand: None,
             kind: WorkerConfigKind::Normal,
         });
 

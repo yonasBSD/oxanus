@@ -12,6 +12,7 @@ enum WorkerError {}
 struct WorkerContext {}
 
 #[derive(Debug, Serialize, Deserialize, oxanus::Job)]
+#[oxanus(on_demand = true)]
 struct SyncCustomerProfileJob {
     duration_ms: u64,
 }

@@ -244,6 +244,12 @@ fn expand_registry(
                             factory: oxanus::job_factory::<#struct_ident, #type_args, #type_context, #type_error>,
                             batch_factory: oxanus::job_batch_factory::<#struct_ident, #type_args, #type_context, #type_error>,
                             batch_config: <#struct_ident as oxanus::Worker<#type_args>>::batch_config(),
+                            on_demand: <#type_args as oxanus::Job>::on_demand_args_template().map(|args_template| {
+                                oxanus::OnDemandJobRegistration {
+                                    args_template,
+                                    enqueue_factory: oxanus::job_envelope_factory::<#type_args>,
+                                }
+                            }),
                             kind: <#struct_ident as oxanus::Worker<#type_args>>::to_config(),
                         })
                     }
