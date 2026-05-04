@@ -2,16 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.0.0-rc.0]
+
+### Breaking Changes
+
+- Rename the project and crates from Oxanus to Oxana. Use `oxana`, `oxana-macros`, `oxana-web`, and `#[oxana(...)]` in manifests, imports, derive attributes, examples, and dashboard integrations.
+- Move enqueue-time metadata onto `#[derive(oxana::Job)]`. Job identity, conflict handling, resurrection, throttle cost, on-demand exposure, and worker binding now belong to the job type; custom job hooks now resolve `Self` as the job type.
+- Route every worker through the batch-capable execution path. Manual worker implementations now provide `run_batch`, while derive users can keep writing `process` for single-job workers or opt into `process_batch`.
+- Own job values during execution instead of borrowing them, so job payload types no longer need to implement `Sync`.
 
 ### Added
 
-- Add `#[derive(oxanus::Job)]` for defining enqueue-time job metadata, including unique IDs, conflict strategy, resurrection behavior, throttle cost, and worker binding.
+- Add batch workers with `#[oxana(batch_size = ..., batch_timeout_ms = ...)]`, `process_batch`, `BatchItem`, and `WorkerBatchConfig` for high-throughput workloads that can process jobs together.
+- Add on-demand jobs: annotate a job with `#[oxana(on_demand)]` to expose it in the web dashboard with editable JSON arguments and type-aware argument templates.
+- Add worker execution metrics, including per-minute success, failure, panic, execution-time, and histogram data through `Storage::job_metrics`, `Storage::job_metrics_for`, and the new `/metrics` dashboard pages.
+- Add queue length history, per-queue processing rates, growth rates, effective drain rates, and ETA estimates to the stats APIs and dashboard.
+- Add `REDIS_STATS_URL`, `build_from_redis_urls`, and `build_from_pools` so counters and metrics can use a separate Redis instance from the primary job store.
+- Add dashboard actions for enqueueing cron jobs immediately and wiping the dead queue.
 
 ### Changed
 
-- Replace runtime Redis `KEYS` calls with cursor-based `SCAN` for queue discovery and orphaned processing queue recovery.
-- Move job-specific derive attributes (`unique_id`, `on_conflict`, `resurrect`, and `throttle_cost`) from `#[derive(oxanus::Worker)]` to `#[derive(oxanus::Job)]`; `Self::...` in job hooks now resolves to the job type.
+- Make dashboard queue and metrics views more operationally useful: queue length charts now live with queue stats, tooltips use readable worker labels, zero-value tooltip rows are hidden, and unknown ETAs sort after known drain times.
+- Reduce Redis pressure by replacing `KEYS` with cursor-based `SCAN`, batching result counter writes, and snapshotting active queue lengths during worker refreshes.
+- Improve on-demand registration so the dashboard can prefill arguments, keep job hooks intact, and choose a sensible default queue.
+- Refresh examples, package metadata, CI paths, documentation references, and dependency versions for the Oxana rename and 2.0 release candidate.
 
 ## [1.1.1]
 
@@ -43,7 +57,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- BSD support for shutdown signal handling ([#41](https://github.com/pragmaplatform/oxanus/issues/41))
+- BSD support for shutdown signal handling ([#41](https://github.com/pragmaplatform/oxana/issues/41))
 
 ## [1.0.3]
 
@@ -79,11 +93,11 @@ All notable changes to this project will be documented in this file.
 - `FromContext` trait for injecting app state into workers (auto-derived for unit and single-field structs)
 - `JobContext` replaces generic `Context<T>`
 - `ContextValue::new(x)` replaces `Context::value(x)`
-- `#[oxanus(job = Type)]` attribute with `{Name}Job` convention default (strips `Worker` suffix)
+- `#[oxana(job = Type)]` attribute with `{Name}Job` convention default (strips `Worker` suffix)
 
 ### Changed
 
-- `#[derive(oxanus::Worker)]` now generates both `Job` and `Worker<Args>` impls
+- `#[derive(oxana::Worker)]` now generates both `Job` and `Worker<Args>` impls
 - `config.register_worker::<W, J>()` replaces `config.register_worker::<W>()`
 - `storage.enqueue(queue, job)` now takes the job struct, not the worker struct
 - Cron `queue` attribute is now required at compile time (was runtime panic)
@@ -141,7 +155,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- Web UI dashboard (`oxanus-web` crate) for monitoring jobs, queues, and cron
+- Web UI dashboard (`oxana-web` crate) for monitoring jobs, queues, and cron
 - Revive button to dead jobs dashboard
 - Link enqueued stat box to queues tab in web dashboard
 
@@ -385,7 +399,7 @@ All notable changes to this project will be documented in this file.
 - Add cron job validation
 - Firehose (optional, disabled by default)
 - Tracing instrument feature
-- Multi-crate workspace structure (`oxanus` + `oxanus-api`)
+- Multi-crate workspace structure (`oxana` + `oxana-api`)
 - Latency max to global stats
 - Global stats enhancements
 - Process reporting and stats expansion
