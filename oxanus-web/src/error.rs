@@ -3,6 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+#[derive(Debug)]
 pub(crate) struct OxanusWebError(#[allow(dead_code)] oxanus::OxanusError);
 
 impl From<oxanus::OxanusError> for OxanusWebError {

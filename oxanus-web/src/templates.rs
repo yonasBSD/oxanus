@@ -410,6 +410,30 @@ pub(crate) struct CronTemplate {
     pub total: usize,
 }
 
+#[derive(Clone)]
+pub(crate) struct OnDemandJobView {
+    pub name: String,
+    pub short_name: String,
+    pub args_template_json: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct OnDemandQueueView {
+    pub key: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "on_demand.html")]
+pub(crate) struct OnDemandTemplate {
+    pub base_path: String,
+    pub active_tab: &'static str,
+    pub jobs: Vec<OnDemandJobView>,
+    pub queues: Vec<OnDemandQueueView>,
+    pub total: usize,
+    pub scheduled: bool,
+    pub invalid_json: bool,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "queue_detail.html")]
 pub(crate) struct QueueDetailTemplate {
@@ -505,5 +529,110 @@ impl GlobalJobsTemplate {
 
     pub fn range_end(&self) -> usize {
         ((self.page - 1) * JOBS_PER_PAGE + self.jobs.len()).min(self.total)
+    }
+}
+
+#[cfg(test)]
+mod on_demand_tests {
+    use super::{OnDemandJobView, OnDemandQueueView, OnDemandTemplate};
+    use askama::Template;
+
+    #[test]
+    fn on_demand_template_renders_empty_state() {
+        let template = OnDemandTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/on-demand",
+            jobs: Vec::new(),
+            queues: vec![OnDemandQueueView {
+                key: "default".to_string(),
+            }],
+            total: 0,
+            scheduled: false,
+            invalid_json: false,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("No on-demand jobs registered"));
+    }
+
+    #[test]
+    fn on_demand_template_renders_no_static_queues_state() {
+        let template = OnDemandTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/on-demand",
+            jobs: vec![OnDemandJobView {
+                name: "crate::EmailWorker".to_string(),
+                short_name: "EmailWorker".to_string(),
+                args_template_json: "{}".to_string(),
+            }],
+            queues: Vec::new(),
+            total: 1,
+            scheduled: false,
+            invalid_json: false,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("No static queues registered"));
+    }
+
+    #[test]
+    fn on_demand_template_prefills_enqueue_form() {
+        let template = OnDemandTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/on-demand",
+            jobs: vec![OnDemandJobView {
+                name: "crate::EmailWorker".to_string(),
+                short_name: "EmailWorker".to_string(),
+                args_template_json: "{\n  \"payload\": \"\"\n}".to_string(),
+            }],
+            queues: vec![OnDemandQueueView {
+                key: "default".to_string(),
+            }],
+            total: 1,
+            scheduled: false,
+            invalid_json: false,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("action=\"/admin/on-demand/enqueue\""));
+        assert!(rendered.contains("<option value=\"default\">default</option>"));
+        assert!(rendered.contains("payload"));
+    }
+
+    #[test]
+    fn on_demand_template_shows_notice_after_successful_enqueue() {
+        let template = OnDemandTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/on-demand",
+            jobs: Vec::new(),
+            queues: Vec::new(),
+            total: 0,
+            scheduled: true,
+            invalid_json: false,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("Job scheduled."));
+    }
+
+    #[test]
+    fn on_demand_template_shows_notice_after_invalid_json() {
+        let template = OnDemandTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/on-demand",
+            jobs: Vec::new(),
+            queues: Vec::new(),
+            total: 0,
+            scheduled: false,
+            invalid_json: true,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("Invalid JSON."));
     }
 }

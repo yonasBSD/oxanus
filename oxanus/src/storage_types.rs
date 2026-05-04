@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::worker_registry::JobEnvelopeFactory;
+use crate::{JobEnvelope, OxanusError};
+
 /// Options for listing jobs in a queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueListOpts {
@@ -18,6 +21,29 @@ pub struct Catalog {
     pub cron_workers: Vec<CronWorkerInfo>,
     /// Registered queues.
     pub queues: Vec<QueueInfo>,
+    /// Jobs explicitly exposed for manual enqueueing from the web dashboard.
+    pub on_demand_jobs: Vec<OnDemandJobInfo>,
+}
+
+/// Information about an on-demand job exposed in the web dashboard.
+#[derive(Debug, Clone)]
+pub struct OnDemandJobInfo {
+    /// The worker name (Rust type path).
+    pub name: String,
+    /// Editable JSON template used to prefill the enqueue form.
+    pub args_template: serde_json::Value,
+    pub(crate) enqueue_factory: JobEnvelopeFactory,
+}
+
+impl OnDemandJobInfo {
+    /// Builds an enqueueable envelope using the registered job type.
+    pub fn enqueue_envelope(
+        &self,
+        queue: String,
+        args: serde_json::Value,
+    ) -> Result<JobEnvelope, OxanusError> {
+        (self.enqueue_factory)(queue, args)
+    }
 }
 
 /// Information about a registered queue.

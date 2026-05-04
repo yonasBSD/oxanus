@@ -11,7 +11,8 @@ use crate::OxanusWebState;
 use crate::error::OxanusWebError;
 use crate::templates::{
     BusyTemplate, CronRow, CronTemplate, CronWorkerView, DashboardTemplate, GlobalJobsTemplate,
-    JobListKind, MetricDetailTemplate, MetricsTemplate, QueueDetailTemplate, QueuesTemplate,
+    JobListKind, MetricDetailTemplate, MetricsTemplate, OnDemandJobView, OnDemandQueueView,
+    OnDemandTemplate, QueueDetailTemplate, QueuesTemplate,
 };
 
 pub(crate) async fn dashboard(
@@ -112,6 +113,65 @@ pub(crate) async fn cron_jobs(Extension(state): Extension<OxanusWebState>) -> Cr
         rows,
         total,
     }
+}
+
+pub(crate) async fn on_demand_jobs(
+    Extension(state): Extension<OxanusWebState>,
+    Query(params): Query<OnDemandParams>,
+) -> OnDemandTemplate {
+    let jobs = state
+        .catalog
+        .on_demand_jobs
+        .iter()
+        .map(|job| OnDemandJobView {
+            name: job.name.clone(),
+            short_name: short_type_name(&job.name),
+            args_template_json: serde_json::to_string_pretty(&job.args_template)
+                .unwrap_or_else(|_| job.args_template.to_string()),
+        })
+        .collect::<Vec<_>>();
+    let queues = state
+        .catalog
+        .queues
+        .iter()
+        .filter(|queue| !queue.dynamic)
+        .map(|queue| OnDemandQueueView {
+            key: queue.key.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    OnDemandTemplate {
+        base_path: state.base_path,
+        active_tab: "/on-demand",
+        total: jobs.len(),
+        jobs,
+        queues,
+        scheduled: params.scheduled.as_deref() == Some("1"),
+        invalid_json: params.invalid_json.as_deref() == Some("1"),
+    }
+}
+
+pub(crate) async fn enqueue_on_demand_job(
+    Extension(state): Extension<OxanusWebState>,
+    Form(form): Form<OnDemandEnqueueJobForm>,
+) -> Result<Redirect, OxanusWebError> {
+    let envelope = match on_demand_envelope_from_form(&state.catalog, &form) {
+        Ok(envelope) => envelope,
+        Err(oxanus::OxanusError::JsonError(_)) => {
+            return Ok(Redirect::to(&format!(
+                "{}/on-demand?invalid_json=1",
+                state.base_path
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    state.storage.enqueue_envelope(envelope).await?;
+
+    Ok(Redirect::to(&format!(
+        "{}/on-demand?scheduled=1",
+        state.base_path
+    )))
 }
 
 pub(crate) async fn scheduled_jobs(
@@ -376,6 +436,21 @@ pub(crate) struct EnqueueJobForm {
     redirect: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct OnDemandEnqueueJobForm {
+    queue: String,
+    name: String,
+    args: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct OnDemandParams {
+    #[serde(default)]
+    scheduled: Option<String>,
+    #[serde(default)]
+    invalid_json: Option<String>,
+}
+
 fn list_opts(page: usize) -> oxanus::QueueListOpts {
     oxanus::QueueListOpts {
         count: JOBS_PER_PAGE + 1,
@@ -429,6 +504,41 @@ fn compare_eta(a: Option<f64>, b: Option<f64>, desc: bool) -> std::cmp::Ordering
     };
 
     if desc { cmp.reverse() } else { cmp }
+}
+
+fn short_type_name(name: &str) -> String {
+    name.rsplit("::").next().unwrap_or(name).to_string()
+}
+
+fn on_demand_envelope_from_form(
+    catalog: &oxanus::Catalog,
+    form: &OnDemandEnqueueJobForm,
+) -> Result<oxanus::JobEnvelope, oxanus::OxanusError> {
+    if !catalog
+        .queues
+        .iter()
+        .any(|queue| !queue.dynamic && queue.key == form.queue)
+    {
+        return Err(oxanus::OxanusError::GenericError(format!(
+            "Queue {} is not a registered static queue",
+            form.queue
+        )));
+    }
+
+    let job = catalog
+        .on_demand_jobs
+        .iter()
+        .find(|job| job.name == form.name)
+        .ok_or_else(|| {
+            oxanus::OxanusError::GenericError(format!(
+                "Job {} is not registered for on-demand enqueue",
+                form.name
+            ))
+        })?;
+    let args: serde_json::Value =
+        serde_json::from_str(&form.args).map_err(oxanus::OxanusError::from)?;
+
+    job.enqueue_envelope(form.queue.clone(), args)
 }
 
 fn build_cron_rows(
@@ -503,8 +613,78 @@ fn build_cron_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::sort_queues;
+    use super::{
+        OnDemandEnqueueJobForm, enqueue_on_demand_job, on_demand_envelope_from_form, sort_queues,
+    };
+    use crate::OxanusWebState;
+    use axum::Form;
+    use axum::extract::Extension;
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse;
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+    use std::io::Error as WorkerError;
+
+    #[derive(Serialize)]
+    struct StaticQueue;
+
+    impl oxanus::Queue for StaticQueue {
+        fn to_config() -> oxanus::QueueConfig {
+            oxanus::QueueConfig::as_static("default")
+        }
+    }
+
+    #[derive(Serialize)]
+    struct DynamicQueue {
+        tenant: String,
+    }
+
+    impl oxanus::Queue for DynamicQueue {
+        fn to_config() -> oxanus::QueueConfig {
+            oxanus::QueueConfig::as_dynamic("tenant")
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize, oxanus::Job)]
+    #[oxanus(worker = OnDemandWorker)]
+    #[oxanus(on_demand = true)]
+    #[oxanus(unique_id = "on_demand_{id}")]
+    struct OnDemandJob {
+        id: u64,
+        payload: String,
+    }
+
+    struct OnDemandWorker;
+
+    impl oxanus::FromContext<()> for OnDemandWorker {
+        fn from_context(_ctx: &()) -> Self {
+            Self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl oxanus::Worker<OnDemandJob> for OnDemandWorker {
+        type Error = WorkerError;
+
+        async fn run_batch(
+            &self,
+            _jobs: Vec<oxanus::BatchItem<OnDemandJob>>,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn on_demand_catalog() -> oxanus::Catalog {
+        let storage = oxanus::Storage::builder()
+            .build_from_redis_url("redis://127.0.0.1/0")
+            .expect("test storage pool should build");
+
+        oxanus::Config::<(), WorkerError>::new(&storage)
+            .register_queue::<StaticQueue>()
+            .register_queue::<DynamicQueue>()
+            .register_worker::<OnDemandWorker, OnDemandJob>()
+            .catalog()
+    }
 
     fn queue_with_eta(key: &str, eta_s: Option<f64>) -> oxanus::QueueStats {
         oxanus::QueueStats {
@@ -555,5 +735,101 @@ mod tests {
             .map(|queue| queue.key.as_str())
             .collect::<Vec<_>>();
         assert_eq!(keys, vec!["never", "slow", "fast"]);
+    }
+
+    #[test]
+    fn on_demand_form_rejects_dynamic_or_unknown_queues() {
+        let catalog = on_demand_catalog();
+
+        let err = on_demand_envelope_from_form(
+            &catalog,
+            &OnDemandEnqueueJobForm {
+                queue: "tenant#tenant=acme".to_string(),
+                name: std::any::type_name::<OnDemandWorker>().to_string(),
+                args: serde_json::json!({
+                    "id": 1,
+                    "payload": "hello",
+                })
+                .to_string(),
+            },
+        )
+        .expect_err("dynamic queues should not be accepted");
+
+        assert!(matches!(err, oxanus::OxanusError::GenericError(_)));
+    }
+
+    #[test]
+    fn on_demand_form_rejects_unknown_jobs() {
+        let catalog = on_demand_catalog();
+
+        let err = on_demand_envelope_from_form(
+            &catalog,
+            &OnDemandEnqueueJobForm {
+                queue: "default".to_string(),
+                name: "missing".to_string(),
+                args: "{}".to_string(),
+            },
+        )
+        .expect_err("unknown jobs should not be accepted");
+
+        assert!(matches!(err, oxanus::OxanusError::GenericError(_)));
+    }
+
+    #[tokio::test]
+    async fn on_demand_enqueue_redirects_after_invalid_json() {
+        let storage = oxanus::Storage::builder()
+            .build_from_redis_url("redis://127.0.0.1/0")
+            .expect("test storage pool should build");
+        let state = OxanusWebState::new(storage, on_demand_catalog(), "/admin".to_string());
+
+        let redirect = enqueue_on_demand_job(
+            Extension(state),
+            Form(OnDemandEnqueueJobForm {
+                queue: "default".to_string(),
+                name: std::any::type_name::<OnDemandWorker>().to_string(),
+                args: "{".to_string(),
+            }),
+        )
+        .await
+        .expect("invalid JSON should redirect back to on-demand");
+
+        let response = redirect.into_response();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/admin/on-demand?invalid_json=1"
+        );
+    }
+
+    #[test]
+    fn on_demand_form_builds_typed_envelope() {
+        let catalog = on_demand_catalog();
+        let envelope = on_demand_envelope_from_form(
+            &catalog,
+            &OnDemandEnqueueJobForm {
+                queue: "default".to_string(),
+                name: std::any::type_name::<OnDemandWorker>().to_string(),
+                args: serde_json::json!({
+                    "id": 42,
+                    "payload": "hello",
+                })
+                .to_string(),
+            },
+        )
+        .expect("valid on-demand form should build an envelope");
+
+        assert_eq!(envelope.queue, "default");
+        assert_eq!(
+            envelope.id,
+            format!("{}/on_demand_42", std::any::type_name::<OnDemandWorker>())
+        );
+        assert_eq!(
+            envelope.job.args,
+            serde_json::json!({
+                "id": 42,
+                "payload": "hello",
+            })
+        );
     }
 }

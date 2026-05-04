@@ -1,8 +1,15 @@
 use darling::{Error, FromDeriveInput, FromMeta};
+use heck::{
+    ToKebabCase, ToLowerCamelCase, ToShoutyKebabCase, ToShoutySnakeCase, ToSnakeCase,
+    ToUpperCamelCase,
+};
 use proc_macro_error2::abort;
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, Expr, Ident, LitStr, Meta, Path, Token, punctuated::Punctuated};
+use syn::{
+    Attribute, Data, DeriveInput, Expr, Fields, GenericArgument, Ident, LitStr, Meta, Path,
+    PathArguments, Token, Type, punctuated::Punctuated,
+};
 
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(oxanus), supports(struct_any))]
@@ -12,6 +19,7 @@ struct OxanusJobArgs {
     on_conflict: Option<Ident>,
     resurrect: Option<bool>,
     throttle_cost: Option<ThrottleCost>,
+    on_demand: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -165,6 +173,9 @@ pub fn expand_derive_job(input: DeriveInput) -> TokenStream {
         None => quote!(),
     };
 
+    let on_demand_args_template =
+        expand_on_demand_args_template(&input, args.on_demand.unwrap_or(false));
+
     quote! {
         #[automatically_derived]
         impl oxanus::Job for #struct_ident {
@@ -182,6 +193,8 @@ pub fn expand_derive_job(input: DeriveInput) -> TokenStream {
             #resurrect
 
             #throttle_cost
+
+            #on_demand_args_template
         }
     }
 }
@@ -264,4 +277,184 @@ fn expand_throttle_cost(throttle_cost: &ThrottleCost) -> TokenStream {
             }
         }
     }
+}
+
+fn expand_on_demand_args_template(input: &DeriveInput, on_demand: bool) -> TokenStream {
+    if !on_demand {
+        return quote!();
+    }
+
+    let template = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => {
+                let rename_all = serde_rename_all(&input.attrs);
+                let entries = fields.named.iter().filter_map(|field| {
+                    let serde = serde_field_attrs(&field.attrs);
+                    if serde.skip {
+                        return None;
+                    }
+
+                    let ident = field.ident.as_ref().expect("named field has ident");
+                    let name = serde
+                        .rename
+                        .unwrap_or_else(|| rename_field(&ident.to_string(), rename_all));
+                    let name = LitStr::new(&name, ident.span());
+                    let value = json_template_for_type(&field.ty);
+                    Some(quote!(#name: #value))
+                });
+                quote!({ #(#entries),* })
+            }
+            Fields::Unnamed(fields) => {
+                let entries = fields
+                    .unnamed
+                    .iter()
+                    .map(|field| json_template_for_type(&field.ty));
+                quote!([ #(#entries),* ])
+            }
+            Fields::Unit => quote!(null),
+        },
+        _ => abort!(input.ident, "Job must be a struct."),
+    };
+
+    quote! {
+        fn on_demand_args_template() -> Option<serde_json::Value>
+        where
+            Self: Sized,
+        {
+            Some(serde_json::json!(#template))
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RenameRule {
+    Lowercase,
+    Uppercase,
+    PascalCase,
+    CamelCase,
+    SnakeCase,
+    ScreamingSnakeCase,
+    KebabCase,
+    ScreamingKebabCase,
+}
+
+impl RenameRule {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "lowercase" => Some(Self::Lowercase),
+            "UPPERCASE" => Some(Self::Uppercase),
+            "PascalCase" => Some(Self::PascalCase),
+            "camelCase" => Some(Self::CamelCase),
+            "snake_case" => Some(Self::SnakeCase),
+            "SCREAMING_SNAKE_CASE" => Some(Self::ScreamingSnakeCase),
+            "kebab-case" => Some(Self::KebabCase),
+            "SCREAMING-KEBAB-CASE" => Some(Self::ScreamingKebabCase),
+            _ => None,
+        }
+    }
+}
+
+fn rename_field(name: &str, rule: Option<RenameRule>) -> String {
+    match rule {
+        Some(RenameRule::Lowercase) => name.to_lowercase(),
+        Some(RenameRule::Uppercase) => name.to_uppercase(),
+        Some(RenameRule::PascalCase) => name.to_upper_camel_case(),
+        Some(RenameRule::CamelCase) => name.to_lower_camel_case(),
+        Some(RenameRule::SnakeCase) => name.to_snake_case(),
+        Some(RenameRule::ScreamingSnakeCase) => name.to_shouty_snake_case(),
+        Some(RenameRule::KebabCase) => name.to_kebab_case(),
+        Some(RenameRule::ScreamingKebabCase) => name.to_shouty_kebab_case(),
+        None => name.to_string(),
+    }
+}
+
+fn serde_rename_all(attrs: &[Attribute]) -> Option<RenameRule> {
+    let mut rename_all = None;
+
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename_all") {
+                let value: LitStr = meta.value()?.parse()?;
+                rename_all = RenameRule::from_str(&value.value());
+            }
+            Ok(())
+        });
+    }
+
+    rename_all
+}
+
+struct SerdeFieldAttrs {
+    rename: Option<String>,
+    skip: bool,
+}
+
+fn serde_field_attrs(attrs: &[Attribute]) -> SerdeFieldAttrs {
+    let mut result = SerdeFieldAttrs {
+        rename: None,
+        skip: false,
+    };
+
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename") {
+                let value: LitStr = meta.value()?.parse()?;
+                result.rename = Some(value.value());
+            } else if meta.path.is_ident("skip") || meta.path.is_ident("skip_deserializing") {
+                result.skip = true;
+            }
+            Ok(())
+        });
+    }
+
+    result
+}
+
+fn json_template_for_type(ty: &Type) -> TokenStream {
+    match ty {
+        Type::Array(_) => quote!([]),
+        Type::Group(group) => json_template_for_type(&group.elem),
+        Type::Paren(paren) => json_template_for_type(&paren.elem),
+        Type::Reference(reference) => json_template_for_type(&reference.elem),
+        Type::Tuple(tuple) => {
+            let entries = tuple.elems.iter().map(json_template_for_type);
+            quote!([ #(#entries),* ])
+        }
+        Type::Path(path) => json_template_for_path(path),
+        _ => quote!({}),
+    }
+}
+
+fn json_template_for_path(path: &syn::TypePath) -> TokenStream {
+    let Some(segment) = path.path.segments.last() else {
+        return quote!({});
+    };
+
+    let ident = segment.ident.to_string();
+
+    match ident.as_str() {
+        "Option" => quote!(null),
+        "String" | "str" => quote!(""),
+        "bool" => quote!(false),
+        "f32" | "f64" => quote!(0.0),
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+        | "usize" => quote!(0),
+        "Vec" | "VecDeque" | "LinkedList" | "HashSet" | "BTreeSet" => quote!([]),
+        "HashMap" | "BTreeMap" => quote!({}),
+        "Box" => {
+            generic_type(&segment.arguments).map_or_else(|| quote!({}), json_template_for_type)
+        }
+        _ => quote!({}),
+    }
+}
+
+fn generic_type(arguments: &PathArguments) -> Option<&Type> {
+    let PathArguments::AngleBracketed(args) = arguments else {
+        return None;
+    };
+
+    args.args.iter().find_map(|argument| match argument {
+        GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })
 }

@@ -3,12 +3,20 @@ use std::str::FromStr;
 
 use crate::WorkerBatchConfig;
 use crate::error::OxanusError;
-use crate::worker::{BoundBatchJob, BoundJob, BoxedProcessable, FromContext, Worker};
+use crate::job_envelope::JobEnvelope;
+use crate::worker::{BoundBatchJob, BoundJob, BoxedProcessable, FromContext, Job, Worker};
 
 pub type JobFactory<DT, ET> =
     fn(serde_json::Value, &DT) -> Result<BoxedProcessable<ET>, OxanusError>;
 pub type JobBatchFactory<DT, ET> =
     fn(Vec<serde_json::Value>, &DT) -> Result<BatchBuild<ET>, OxanusError>;
+pub type JobEnvelopeFactory = fn(String, serde_json::Value) -> Result<JobEnvelope, OxanusError>;
+
+#[derive(Clone)]
+pub struct OnDemandJobRegistration {
+    pub args_template: serde_json::Value,
+    pub enqueue_factory: JobEnvelopeFactory,
+}
 
 pub struct BatchBuild<ET> {
     pub job: Option<BoxedProcessable<ET>>,
@@ -23,6 +31,7 @@ pub struct InvalidBatchJob {
 pub struct WorkerRegistry<DT, ET> {
     jobs: HashMap<String, WorkerFactories<DT, ET>>,
     pub schedules: HashMap<String, CronJob>,
+    pub on_demand_jobs: HashMap<String, OnDemandJobRegistration>,
 }
 
 pub struct WorkerConfig<DT, ET> {
@@ -30,6 +39,7 @@ pub struct WorkerConfig<DT, ET> {
     pub factory: JobFactory<DT, ET>,
     pub batch_factory: JobBatchFactory<DT, ET>,
     pub batch_config: Option<WorkerBatchConfig>,
+    pub on_demand: Option<OnDemandJobRegistration>,
     pub kind: WorkerConfigKind,
 }
 
@@ -98,6 +108,17 @@ where
     })
 }
 
+pub fn job_envelope_factory<A>(
+    queue: String,
+    value: serde_json::Value,
+) -> Result<JobEnvelope, OxanusError>
+where
+    A: Job + serde::de::DeserializeOwned + Send + 'static,
+{
+    let job: A = serde_json::from_value(value)?;
+    JobEnvelope::new(queue, job)
+}
+
 struct WorkerFactories<DT, ET> {
     factory: JobFactory<DT, ET>,
     batch_factory: JobBatchFactory<DT, ET>,
@@ -109,33 +130,40 @@ impl<DT, ET> WorkerRegistry<DT, ET> {
         Self {
             jobs: HashMap::new(),
             schedules: HashMap::new(),
+            on_demand_jobs: HashMap::new(),
         }
     }
 
     pub fn register_worker_with(&mut self, config: WorkerConfig<DT, ET>) {
+        let name = config.name;
         let factories = WorkerFactories {
             factory: config.factory,
             batch_factory: config.batch_factory,
             batch_config: config.batch_config,
         };
 
+        if let Some(on_demand) = config.on_demand {
+            self.on_demand_jobs.insert(name.clone(), on_demand);
+        } else {
+            self.on_demand_jobs.remove(&name);
+        }
+
         match config.kind {
             WorkerConfigKind::Normal => {
-                self.jobs.insert(config.name, factories);
+                self.jobs.insert(name, factories);
             }
             WorkerConfigKind::Cron {
                 schedule,
                 queue_key,
                 resurrect,
             } => {
-                self.jobs.insert(config.name.clone(), factories);
+                self.jobs.insert(name.clone(), factories);
 
-                let schedule = cron::Schedule::from_str(&schedule).unwrap_or_else(|_| {
-                    panic!("{}: Invalid cron schedule: {schedule}", config.name)
-                });
+                let schedule = cron::Schedule::from_str(&schedule)
+                    .unwrap_or_else(|_| panic!("{}: Invalid cron schedule: {schedule}", name));
 
                 self.schedules.insert(
-                    config.name,
+                    name,
                     CronJob {
                         schedule,
                         queue_key,

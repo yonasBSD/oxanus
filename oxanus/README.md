@@ -111,6 +111,7 @@ The dashboard exposes these pages:
 - `/metrics` - Worker execution metrics
 - `/metrics/job?worker=...` - Metrics for a specific worker
 - `/cron` - Cron job schedules
+- `/on-demand` - Manually enqueue registered on-demand jobs
 - `/scheduled` - Scheduled jobs
 - `/retries` - Jobs pending retry
 - `/dead` - Dead letter queue
@@ -130,7 +131,7 @@ Jobs carry the data that gets enqueued and define enqueue-time metadata. Workers
 | `#[oxanus(on_conflict = Skip)]` - handle unique job conflicts (Skip or Replace) | `#[oxanus(error = MyError)]` - set worker error type |
 | `#[oxanus(resurrect = false)]` - disable crash resurrection for this job type | `#[oxanus(registry = MyRegistry)]` - choose component registry |
 | `#[oxanus(throttle_cost = 2)]` - set per-job throttle cost | `#[oxanus(max_retries = 3)]` - set maximum retry attempts |
-|  | `#[oxanus(retry_delay = 5)]` - set retry delay in seconds |
+| `#[oxanus(on_demand = true)]` - expose the job in the web dashboard for manual enqueueing | `#[oxanus(retry_delay = 5)]` - set retry delay in seconds |
 |  | `#[oxanus(cron(schedule = "*/5 * * * * *", queue = MyQueue))]` - schedule periodic jobs |
 |  | `#[oxanus(batch_size = 100, batch_timeout_ms = 500)]` - process jobs in batches |
 

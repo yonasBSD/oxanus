@@ -121,7 +121,10 @@ pub use crate::storage::Storage;
 pub use crate::storage_builder::{StorageBuilder, StorageBuilderTimeouts};
 pub use crate::storage_types::*;
 pub use crate::worker::{BatchItem, FromContext, Job, Worker, WorkerBatchConfig};
-pub use crate::worker_registry::{WorkerConfig, WorkerConfigKind, job_batch_factory, job_factory};
+pub use crate::worker_registry::{
+    OnDemandJobRegistration, WorkerConfig, WorkerConfigKind, job_batch_factory,
+    job_envelope_factory, job_factory,
+};
 
 #[cfg(feature = "registry")]
 pub use registry::*;
