@@ -177,6 +177,30 @@ fn should_show_progress(val: &serde_json::Value) -> bool {
     progress_parts(val).is_some_and(|progress| progress.processed != 0 || progress.total != 0)
 }
 
+fn progress_eta_s(
+    val: &serde_json::Value,
+    scheduled_at_micros: i64,
+    now_micros: i64,
+) -> Option<f64> {
+    let progress = progress_parts(val)?;
+    if progress.total <= 0 || progress.processed <= 0 || scheduled_at_micros <= 0 {
+        return None;
+    }
+
+    let remaining = progress.total.saturating_sub(progress.processed).max(0);
+    if remaining == 0 {
+        return Some(0.0);
+    }
+
+    let elapsed_s = (now_micros - scheduled_at_micros) as f64 / 1_000_000.0;
+    if elapsed_s <= 0.0 {
+        return None;
+    }
+
+    let processed = progress.processed.max(0) as f64;
+    Some(elapsed_s * (remaining as f64 / processed))
+}
+
 #[askama::filter_fn]
 pub fn show_job_progress(
     val: &serde_json::Value,
@@ -239,9 +263,24 @@ pub fn job_progress_note(
         .unwrap_or_default())
 }
 
+#[askama::filter_fn]
+pub fn job_progress_eta(
+    val: &serde_json::Value,
+    _env: &dyn askama::Values,
+    scheduled_at_micros: &i64,
+) -> askama::Result<String> {
+    Ok(progress_eta_s(
+        val,
+        *scheduled_at_micros,
+        chrono::Utc::now().timestamp_micros(),
+    )
+    .map(format_duration_from_secs)
+    .unwrap_or_else(|| "—".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{progress_parts, should_show_progress};
+    use super::{progress_eta_s, progress_parts, should_show_progress};
     use serde_json::json;
 
     #[test]
@@ -291,5 +330,45 @@ mod tests {
             "processed": 0,
             "total": 100
         })));
+    }
+
+    #[test]
+    fn progress_eta_uses_scheduled_time_and_progress_rate() {
+        let state = json!({
+            "cursor": 42,
+            "processed": 25,
+            "total": 100
+        });
+
+        assert_eq!(progress_eta_s(&state, 1_000_000, 11_000_000), Some(30.0));
+    }
+
+    #[test]
+    fn progress_eta_is_unknown_without_rate() {
+        assert_eq!(
+            progress_eta_s(
+                &json!({
+                    "cursor": 42,
+                    "processed": 0,
+                    "total": 100
+                }),
+                1_000_000,
+                11_000_000
+            ),
+            None
+        );
+        assert_eq!(progress_eta_s(&json!([42, 25, 100]), 0, 11_000_000), None);
+    }
+
+    #[test]
+    fn progress_eta_is_zero_when_complete() {
+        assert_eq!(
+            progress_eta_s(&json!([42, 100, 100]), 1_000_000, 11_000_000),
+            Some(0.0)
+        );
+        assert_eq!(
+            progress_eta_s(&json!([42, 125, 100]), 1_000_000, 11_000_000),
+            Some(0.0)
+        );
     }
 }
