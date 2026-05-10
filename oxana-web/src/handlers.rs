@@ -83,9 +83,7 @@ pub(crate) async fn metrics(
         "desc"
     };
     let sort_key = if sort.is_empty() { "total_time" } else { sort };
-    let mut table_workers = metrics.workers.clone();
-
-    sort_worker_metrics(&mut table_workers, sort_key, dir == "desc");
+    let table_workers = sorted_worker_metrics(&metrics.workers, sort_key, dir == "desc");
 
     Ok(MetricsTemplate {
         base_path: state.base_path,
@@ -562,7 +560,13 @@ fn valid_metric_sort(sort: &str) -> bool {
     )
 }
 
-fn sort_worker_metrics(workers: &mut [oxana::WorkerMetricsSummary], sort: &str, desc: bool) {
+fn sorted_worker_metrics(
+    workers: &[oxana::WorkerMetricsSummary],
+    sort: &str,
+    desc: bool,
+) -> Vec<oxana::WorkerMetricsSummary> {
+    let mut workers = workers.to_vec();
+
     workers.sort_by(|a, b| {
         let cmp = match sort {
             "processed" => a.totals.processed.cmp(&b.totals.processed),
@@ -579,6 +583,8 @@ fn sort_worker_metrics(workers: &mut [oxana::WorkerMetricsSummary], sort: &str, 
 
         cmp.then_with(|| a.identity.worker.cmp(&b.identity.worker))
     });
+
+    workers
 }
 
 fn compare_eta(a: Option<f64>, b: Option<f64>, desc: bool) -> std::cmp::Ordering {
@@ -826,7 +832,7 @@ mod tests {
     use super::{
         CronEnqueueJobForm, OnDemandEnqueueJobForm, build_on_demand_queue_views,
         cron_envelope_from_form, enqueue_on_demand_job, on_demand_envelope_from_form, sort_queues,
-        sort_worker_metrics,
+        sorted_worker_metrics,
     };
     use crate::OxanaWebState;
     use axum::Form;
@@ -1000,32 +1006,33 @@ mod tests {
 
     #[test]
     fn worker_metrics_sort_defaults_to_descending_metric_values() {
-        let mut workers = vec![
+        let workers = vec![
             worker_metrics("fast", 5, 5, 0, 100, 5),
             worker_metrics("busy", 20, 18, 2, 90, 10),
             worker_metrics("idle", 1, 1, 0, 500, 1),
         ];
 
-        sort_worker_metrics(&mut workers, "processed", true);
+        let sorted = sorted_worker_metrics(&workers, "processed", true);
 
-        let names = workers
+        let names = sorted
             .iter()
             .map(|worker| worker.identity.worker.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["busy", "fast", "idle"]);
+        assert_eq!(workers[0].identity.worker, "fast");
     }
 
     #[test]
     fn worker_metrics_sort_uses_average_execution_time() {
-        let mut workers = vec![
+        let workers = vec![
             worker_metrics("quick", 5, 5, 0, 100, 5),
             worker_metrics("slow", 2, 2, 0, 600, 2),
             worker_metrics("medium", 3, 3, 0, 300, 3),
         ];
 
-        sort_worker_metrics(&mut workers, "avg_time", true);
+        let sorted = sorted_worker_metrics(&workers, "avg_time", true);
 
-        let names = workers
+        let names = sorted
             .iter()
             .map(|worker| worker.identity.worker.as_str())
             .collect::<Vec<_>>();
