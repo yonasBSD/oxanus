@@ -71,12 +71,27 @@ pub(crate) async fn metrics(
     Query(params): Query<MetricsParams>,
 ) -> Result<MetricsTemplate, OxanaWebError> {
     let query = oxana::JobMetricsQuery::new(params.minutes.unwrap_or(0));
-    let metrics = state.storage.job_metrics(query).await?;
+    let mut metrics = state.storage.job_metrics(query).await?;
+    let sort = params
+        .sort
+        .as_deref()
+        .filter(|sort| valid_metric_sort(sort))
+        .unwrap_or("");
+    let dir = if !sort.is_empty() && params.dir.as_deref() == Some("asc") {
+        "asc"
+    } else {
+        "desc"
+    };
+    let sort_key = if sort.is_empty() { "total_time" } else { sort };
+
+    sort_worker_metrics(&mut metrics.workers, sort_key, dir == "desc");
 
     Ok(MetricsTemplate {
         base_path: state.base_path,
         active_tab: "/metrics",
         metrics,
+        sort: sort.to_string(),
+        dir: dir.to_string(),
     })
 }
 
@@ -443,6 +458,10 @@ pub(crate) struct QueuesParams {
 #[derive(Deserialize)]
 pub(crate) struct MetricsParams {
     #[serde(default)]
+    sort: Option<String>,
+    #[serde(default)]
+    dir: Option<String>,
+    #[serde(default)]
     minutes: Option<usize>,
 }
 
@@ -531,6 +550,32 @@ fn sort_queues(
             };
             if desc { cmp.reverse() } else { cmp }
         }
+    });
+}
+
+fn valid_metric_sort(sort: &str) -> bool {
+    matches!(
+        sort,
+        "processed" | "succeeded" | "failed" | "total_time" | "avg_time"
+    )
+}
+
+fn sort_worker_metrics(workers: &mut [oxana::WorkerMetricsSummary], sort: &str, desc: bool) {
+    workers.sort_by(|a, b| {
+        let cmp = match sort {
+            "processed" => a.totals.processed.cmp(&b.totals.processed),
+            "succeeded" => a.totals.succeeded.cmp(&b.totals.succeeded),
+            "failed" => a.totals.failed.cmp(&b.totals.failed),
+            "avg_time" => a
+                .totals
+                .average_execution_ms()
+                .partial_cmp(&b.totals.average_execution_ms())
+                .unwrap_or(std::cmp::Ordering::Equal),
+            _ => a.totals.execution_ms.cmp(&b.totals.execution_ms),
+        };
+        let cmp = if desc { cmp.reverse() } else { cmp };
+
+        cmp.then_with(|| a.identity.worker.cmp(&b.identity.worker))
     });
 }
 
@@ -779,6 +824,7 @@ mod tests {
     use super::{
         CronEnqueueJobForm, OnDemandEnqueueJobForm, build_on_demand_queue_views,
         cron_envelope_from_form, enqueue_on_demand_job, on_demand_envelope_from_form, sort_queues,
+        sort_worker_metrics,
     };
     use crate::OxanaWebState;
     use axum::Form;
@@ -924,6 +970,64 @@ mod tests {
             .map(|queue| queue.key.as_str())
             .collect::<Vec<_>>();
         assert_eq!(keys, vec!["never", "slow", "fast"]);
+    }
+
+    fn worker_metrics(
+        worker: &str,
+        processed: u64,
+        succeeded: u64,
+        failed: u64,
+        execution_ms: u64,
+        successful_executions: u64,
+    ) -> oxana::WorkerMetricsSummary {
+        oxana::WorkerMetricsSummary {
+            identity: oxana::MetricIdentity {
+                worker: worker.to_string(),
+            },
+            totals: oxana::JobMetricsTotals {
+                processed,
+                succeeded,
+                failed,
+                execution_ms,
+                successful_executions,
+                ..oxana::JobMetricsTotals::default()
+            },
+            series: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn worker_metrics_sort_defaults_to_descending_metric_values() {
+        let mut workers = vec![
+            worker_metrics("fast", 5, 5, 0, 100, 5),
+            worker_metrics("busy", 20, 18, 2, 90, 10),
+            worker_metrics("idle", 1, 1, 0, 500, 1),
+        ];
+
+        sort_worker_metrics(&mut workers, "processed", true);
+
+        let names = workers
+            .iter()
+            .map(|worker| worker.identity.worker.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["busy", "fast", "idle"]);
+    }
+
+    #[test]
+    fn worker_metrics_sort_uses_average_execution_time() {
+        let mut workers = vec![
+            worker_metrics("quick", 5, 5, 0, 100, 5),
+            worker_metrics("slow", 2, 2, 0, 600, 2),
+            worker_metrics("medium", 3, 3, 0, 300, 3),
+        ];
+
+        sort_worker_metrics(&mut workers, "avg_time", true);
+
+        let names = workers
+            .iter()
+            .map(|worker| worker.identity.worker.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["slow", "medium", "quick"]);
     }
 
     #[test]
