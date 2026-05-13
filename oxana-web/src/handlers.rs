@@ -425,12 +425,12 @@ pub(crate) async fn set_queue_concurrency(
         .into());
     }
 
-    let mut config = queue_runtime_config_for(&state, &queue_key).await?.config;
-    config.concurrency = Some(form.concurrency);
-
     state
         .storage
-        .set_queue_config(RawQueue::from_catalog(&state.catalog, &queue_key), &config)
+        .set_queue_concurrency(
+            RawQueue::from_catalog(&state.catalog, &queue_key),
+            form.concurrency,
+        )
         .await?;
 
     Ok(queue_redirect(&state.base_path, &queue_key))
@@ -473,35 +473,40 @@ pub(crate) async fn enqueue_job(
 struct RawQueue {
     key: String,
     #[serde(skip_serializing)]
+    base_key: String,
+    #[serde(skip_serializing)]
+    dynamic: bool,
+    #[serde(skip_serializing)]
     concurrency: oxana::QueueConcurrency,
 }
 
 impl RawQueue {
     fn fixed(key: String) -> Self {
         Self {
+            base_key: key.clone(),
             key,
+            dynamic: false,
             concurrency: oxana::QueueConcurrency::Fixed(1),
         }
     }
 
     fn from_catalog(catalog: &oxana::Catalog, key: &str) -> Self {
         let base_key = base_queue_key(key);
-        let concurrency = catalog
-            .queues
-            .iter()
-            .find(|queue| queue.key == base_key)
-            .map_or(oxana::QueueConcurrency::Fixed(1), |queue| {
-                if queue.dynamic_concurrency {
-                    oxana::QueueConcurrency::Dynamic {
-                        default: queue.concurrency,
-                    }
-                } else {
-                    oxana::QueueConcurrency::Fixed(queue.concurrency)
+        let queue_info = catalog.queues.iter().find(|queue| queue.key == base_key);
+        let concurrency = queue_info.map_or(oxana::QueueConcurrency::Fixed(1), |queue| {
+            if queue.dynamic_concurrency {
+                oxana::QueueConcurrency::Dynamic {
+                    default: queue.concurrency,
                 }
-            });
+            } else {
+                oxana::QueueConcurrency::Fixed(queue.concurrency)
+            }
+        });
 
         Self {
             key: key.to_string(),
+            base_key: base_key.to_string(),
+            dynamic: queue_info.is_some_and(|queue| queue.dynamic),
             concurrency,
         }
     }
@@ -517,13 +522,15 @@ impl oxana::Queue for RawQueue {
     }
 
     fn config(&self) -> oxana::QueueConfig {
+        let config = if self.dynamic {
+            oxana::QueueConfig::as_dynamic(self.base_key.clone())
+        } else {
+            oxana::QueueConfig::as_static(self.key.clone())
+        };
+
         match self.concurrency {
-            oxana::QueueConcurrency::Fixed(concurrency) => {
-                oxana::QueueConfig::as_static(self.key.clone()).concurrency(concurrency)
-            }
-            oxana::QueueConcurrency::Dynamic { default } => {
-                oxana::QueueConfig::as_static(self.key.clone()).dynamic_concurrency(default)
-            }
+            oxana::QueueConcurrency::Fixed(concurrency) => config.concurrency(concurrency),
+            oxana::QueueConcurrency::Dynamic { default } => config.dynamic_concurrency(default),
         }
     }
 }
@@ -779,12 +786,7 @@ async fn queue_runtime_config_for(
     state: &OxanaWebState,
     queue_key: &str,
 ) -> Result<QueueRuntimeConfigView, oxana::OxanaError> {
-    let base_key = base_queue_key(queue_key);
-    let keys = if base_key == queue_key {
-        vec![base_key.to_string()]
-    } else {
-        vec![base_key.to_string(), queue_key.to_string()]
-    };
+    let keys = queue_runtime_config_keys(queue_key);
     let stored_configs = state.storage.queue_configs(&keys).await?;
 
     Ok(queue_runtime_config_view_from_map(
@@ -792,6 +794,15 @@ async fn queue_runtime_config_for(
         &stored_configs,
         queue_key,
     ))
+}
+
+fn queue_runtime_config_keys(queue_key: &str) -> Vec<String> {
+    let base_key = base_queue_key(queue_key);
+    if base_key == queue_key {
+        vec![base_key.to_string()]
+    } else {
+        vec![base_key.to_string(), queue_key.to_string()]
+    }
 }
 
 fn default_queue_runtime_config(
@@ -1312,6 +1323,10 @@ mod tests {
             queue.config().concurrency,
             oxana::QueueConcurrency::Dynamic { default: 7 }
         );
+        assert!(matches!(
+            queue.config().kind,
+            oxana::QueueKind::Dynamic { ref prefix, .. } if prefix == "tenant"
+        ));
     }
 
     #[test]

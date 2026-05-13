@@ -1,7 +1,41 @@
 use crate::shared::*;
 use deadpool_redis::redis::AsyncCommands;
+use oxana::Queue as _;
 use std::time::Duration;
 use testresult::TestResult;
+
+#[derive(serde::Serialize)]
+struct DynamicConcurrencyQueue;
+
+impl oxana::Queue for DynamicConcurrencyQueue {
+    fn to_config() -> oxana::QueueConfig {
+        oxana::QueueConfig::as_static("dynamic_concurrency").dynamic_concurrency(3)
+    }
+}
+
+#[derive(serde::Serialize)]
+struct DynamicTenantBase;
+
+impl oxana::Queue for DynamicTenantBase {
+    fn key(&self) -> String {
+        "tenant".to_string()
+    }
+
+    fn to_config() -> oxana::QueueConfig {
+        oxana::QueueConfig::as_dynamic("tenant").dynamic_concurrency(3)
+    }
+}
+
+#[derive(serde::Serialize)]
+struct DynamicTenantQueue {
+    tenant: String,
+}
+
+impl oxana::Queue for DynamicTenantQueue {
+    fn to_config() -> oxana::QueueConfig {
+        oxana::QueueConfig::as_dynamic("tenant").dynamic_concurrency(3)
+    }
+}
 
 #[tokio::test]
 pub async fn test_standard() -> TestResult {
@@ -111,6 +145,103 @@ pub async fn test_fixed_queue_rejects_runtime_concurrency_override() -> TestResu
         .expect_err("fixed queues should reject runtime concurrency overrides");
 
     assert!(matches!(error, oxana::OxanaError::ConfigError(_)));
+
+    Ok(())
+}
+
+#[tokio::test]
+pub async fn test_dynamic_queue_unsets_runtime_concurrency_when_default_is_set() -> TestResult {
+    let redis_pool = setup();
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool)?;
+    let queue_key = "dynamic_concurrency".to_string();
+
+    storage
+        .set_queue_concurrency(DynamicConcurrencyQueue, 3)
+        .await?;
+    let configs = storage
+        .queue_configs(std::slice::from_ref(&queue_key))
+        .await?;
+    assert!(configs.is_empty());
+
+    storage
+        .set_queue_concurrency(DynamicConcurrencyQueue, 5)
+        .await?;
+    let configs = storage
+        .queue_configs(std::slice::from_ref(&queue_key))
+        .await?;
+    assert_eq!(
+        configs
+            .get(&queue_key)
+            .and_then(|config| config.concurrency),
+        Some(5)
+    );
+
+    storage
+        .set_queue_state(DynamicConcurrencyQueue, oxana::QueueState::Paused)
+        .await?;
+    storage
+        .set_queue_concurrency(DynamicConcurrencyQueue, 3)
+        .await?;
+
+    let configs = storage
+        .queue_configs(std::slice::from_ref(&queue_key))
+        .await?;
+    let config = configs
+        .get(&queue_key)
+        .expect("queue state should preserve runtime config");
+    assert_eq!(config.concurrency, None);
+    assert_eq!(config.state, oxana::QueueState::Paused);
+
+    Ok(())
+}
+
+#[tokio::test]
+pub async fn test_dynamic_child_queue_unsets_runtime_concurrency_when_inherited_default_is_set()
+-> TestResult {
+    let redis_pool = setup();
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool)?;
+    let child_queue = DynamicTenantQueue {
+        tenant: "acme".to_string(),
+    };
+    let child_queue_key = child_queue.key();
+
+    storage.set_queue_concurrency(DynamicTenantBase, 5).await?;
+    storage.set_queue_concurrency(child_queue, 5).await?;
+
+    let configs = storage
+        .queue_configs(std::slice::from_ref(&child_queue_key))
+        .await?;
+    assert!(configs.is_empty());
+
+    let child_queue = DynamicTenantQueue {
+        tenant: "acme".to_string(),
+    };
+    storage.set_queue_concurrency(child_queue, 9).await?;
+    let configs = storage
+        .queue_configs(std::slice::from_ref(&child_queue_key))
+        .await?;
+    assert_eq!(
+        configs
+            .get(&child_queue_key)
+            .and_then(|config| config.concurrency),
+        Some(9)
+    );
+
+    let child_queue = DynamicTenantQueue {
+        tenant: "acme".to_string(),
+    };
+    storage.set_queue_concurrency(child_queue, 5).await?;
+    let configs = storage
+        .queue_configs(std::slice::from_ref(&child_queue_key))
+        .await?;
+    let config = configs
+        .get(&child_queue_key)
+        .expect("child runtime config should remain after clearing override");
+    assert_eq!(config.concurrency, None);
 
     Ok(())
 }

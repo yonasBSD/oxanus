@@ -19,7 +19,7 @@
                 <h2 class="text-lg font-semibold font-mono">{{ queue_key }}</h2>
                 <span class="px-2.5 py-1 rounded border text-xs font-medium {{ self.state_class() }}">{{ self.state_label() }}</span>
                 <span class="px-2.5 py-1 rounded border border-gray-800 bg-gray-900 text-gray-300 text-xs">
-                    Concurrency {{ self.concurrency_label() }}
+                    Concurrency: {{ self.concurrency_label() }}
                     {% if self.has_concurrency_override() %}
                     <span class="text-gray-500">(<span class="line-through">{{ self.concurrency_default_label() }}</span>)</span>
                     {% endif %}

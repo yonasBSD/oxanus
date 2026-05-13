@@ -260,19 +260,6 @@ impl StorageInternal {
         Ok(())
     }
 
-    pub async fn set_queue_concurrency(
-        &self,
-        queue: &str,
-        concurrency: usize,
-    ) -> Result<(), OxanaError> {
-        let mut config = self
-            .queue_config(queue)
-            .await?
-            .unwrap_or_else(|| QueueRuntimeConfig::new(concurrency));
-        config.concurrency = Some(concurrency);
-        self.set_queue_config(queue, &config).await
-    }
-
     pub async fn set_queue_state(&self, queue: &str, state: QueueState) -> Result<(), OxanaError> {
         let mut config = self.queue_config(queue).await?.unwrap_or_default();
         config.state = state;
@@ -2420,7 +2407,9 @@ mod tests {
         assert_eq!(changed_default.state, QueueState::Active);
         assert_eq!(storage.queue_config(&queue).await?, None);
 
-        storage.set_queue_concurrency(&queue, 7).await?;
+        storage
+            .set_queue_config(&queue, &QueueRuntimeConfig::new(7))
+            .await?;
         storage.set_queue_state(&queue, QueueState::Paused).await?;
 
         let config = storage

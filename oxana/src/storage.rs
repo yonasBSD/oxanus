@@ -7,7 +7,7 @@ use crate::{
         JobMetricsDetail, JobMetricsQuery, JobMetricsSnapshot, MetricIdentity,
         QueueLengthMetricsSnapshot,
     },
-    queue::{Queue, QueueConcurrency, QueueRuntimeConfig, QueueState},
+    queue::{Queue, QueueConcurrency, QueueKind, QueueRuntimeConfig, QueueState},
     stats::{Process, QueueStats, Stats},
     storage_builder::StorageBuilder,
     storage_internal::StorageInternal,
@@ -361,10 +361,46 @@ impl Storage {
         concurrency: usize,
     ) -> Result<(), OxanaError> {
         let queue_key = queue.key();
-        validate_dynamic_concurrency(&queue_key, queue.config().concurrency)?;
-        self.internal
-            .set_queue_concurrency(&queue_key, concurrency)
-            .await
+        let queue_config = queue.config();
+        let queue_concurrency = queue_config.concurrency;
+        validate_dynamic_concurrency(&queue_key, queue_concurrency)?;
+
+        let default_concurrency = self
+            .runtime_concurrency_reset_default(&queue_key, &queue_config.kind, queue_concurrency)
+            .await?;
+        let existing_config = self.internal.queue_config(&queue_key).await?;
+
+        if concurrency == default_concurrency && existing_config.is_none() {
+            return Ok(());
+        }
+
+        let mut config = existing_config.unwrap_or_default();
+        config.concurrency = (concurrency != default_concurrency).then_some(concurrency);
+
+        self.internal.set_queue_config(&queue_key, &config).await
+    }
+
+    async fn runtime_concurrency_reset_default(
+        &self,
+        queue_key: &str,
+        queue_kind: &QueueKind,
+        queue_concurrency: QueueConcurrency,
+    ) -> Result<usize, OxanaError> {
+        let configured_default = queue_concurrency.default_concurrency();
+        let QueueKind::Dynamic { prefix, .. } = queue_kind else {
+            return Ok(configured_default);
+        };
+
+        if queue_key == prefix {
+            return Ok(configured_default);
+        }
+
+        let base_config = self
+            .internal
+            .queue_config_or_default(prefix, queue_concurrency.stored_runtime_default())
+            .await?;
+
+        Ok(base_config.concurrency.unwrap_or(configured_default))
     }
 
     /// Updates the runtime processing state for a queue.
