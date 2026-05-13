@@ -178,37 +178,26 @@ impl StorageInternal {
             .await
     }
 
-    pub async fn ensure_queue_config(
+    pub async fn queue_config_or_default(
         &self,
         queue: &str,
         default_config: QueueRuntimeConfig,
     ) -> Result<QueueRuntimeConfig, OxanaError> {
         let mut redis = self.connection().await?;
-        self.ensure_queue_config_w_conn(&mut redis, queue, default_config)
+        self.queue_config_or_default_w_conn(&mut redis, queue, default_config)
             .await
     }
 
-    async fn ensure_queue_config_w_conn(
+    async fn queue_config_or_default_w_conn(
         &self,
         redis: &mut deadpool_redis::Connection,
         queue: &str,
         default_config: QueueRuntimeConfig,
     ) -> Result<QueueRuntimeConfig, OxanaError> {
-        let inserted: bool = redis::cmd("HSETNX")
-            .arg(&self.keys.queue_configs)
-            .arg(queue)
-            .arg(serde_json::to_string(&default_config)?)
-            .query_async(redis)
-            .await?;
-
-        if inserted {
-            Ok(default_config)
-        } else {
-            let config = self.queue_config_w_conn(redis, queue).await?;
-            Ok(config
-                .map(|config| config.with_defaults(default_config.clone()))
-                .unwrap_or(default_config))
-        }
+        let config = self.queue_config_w_conn(redis, queue).await?;
+        Ok(config
+            .map(|config| config.with_defaults(default_config.clone()))
+            .unwrap_or(default_config))
     }
 
     pub async fn queue_config(
@@ -2413,9 +2402,23 @@ mod tests {
 
         let default_config = QueueRuntimeConfig::new(3);
         let config = storage
-            .ensure_queue_config(&queue, default_config.clone())
+            .queue_config_or_default(&queue, default_config.clone())
             .await?;
         assert_eq!(config, default_config);
+        assert_eq!(storage.queue_config(&queue).await?, None);
+        assert!(
+            storage
+                .queue_configs(std::slice::from_ref(&queue))
+                .await?
+                .is_empty()
+        );
+
+        let changed_default = storage
+            .queue_config_or_default(&queue, QueueRuntimeConfig::new(5))
+            .await?;
+        assert_eq!(changed_default.concurrency, Some(5));
+        assert_eq!(changed_default.state, QueueState::Active);
+        assert_eq!(storage.queue_config(&queue).await?, None);
 
         storage.set_queue_concurrency(&queue, 7).await?;
         storage.set_queue_state(&queue, QueueState::Paused).await?;
@@ -2428,7 +2431,7 @@ mod tests {
         assert_eq!(config.state, QueueState::Paused);
 
         let preserved = storage
-            .ensure_queue_config(&queue, QueueRuntimeConfig::new(1))
+            .queue_config_or_default(&queue, QueueRuntimeConfig::new(1))
             .await?;
         assert_eq!(preserved.concurrency, Some(7));
         assert_eq!(preserved.state, QueueState::Paused);
@@ -2454,7 +2457,7 @@ mod tests {
         assert_eq!(stored.state, QueueState::Paused);
 
         let runtime_config = storage
-            .ensure_queue_config(&queue, QueueRuntimeConfig::new(4))
+            .queue_config_or_default(&queue, QueueRuntimeConfig::new(4))
             .await?;
         assert_eq!(runtime_config.concurrency, Some(4));
         assert_eq!(runtime_config.state, QueueState::Paused);

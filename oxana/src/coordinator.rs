@@ -625,12 +625,6 @@ where
     let default_runtime_config = queue_concurrency.stored_runtime_default();
     let base_queue_key = queue_config.key_or_prefix();
 
-    config
-        .storage
-        .internal
-        .ensure_queue_config(&base_queue_key, default_runtime_config.clone())
-        .await?;
-
     loop {
         let all_queues: HashSet<String> = match &queue_config.kind {
             QueueKind::Static { key } => HashSet::from([key.clone()]),
@@ -650,21 +644,13 @@ where
                 "Tracking queue"
             );
 
-            let queue_default_config = if queue == base_queue_key {
-                default_runtime_config.clone()
-            } else {
-                config
-                    .storage
-                    .internal
-                    .queue_config(&base_queue_key)
-                    .await?
-                    .unwrap_or_else(|| default_runtime_config.clone())
-            };
-            let runtime_config = config
-                .storage
-                .internal
-                .ensure_queue_config(&queue, queue_default_config.clone())
-                .await?;
+            let runtime_config = runtime_queue_config(
+                &config,
+                &queue,
+                &base_queue_key,
+                default_runtime_config.clone(),
+            )
+            .await?;
             let runtime_config = queue_concurrency.effective_runtime_config(runtime_config);
             let queue_control = queue_controls
                 .get_or_create(queue.clone(), runtime_config.clone())
@@ -674,12 +660,14 @@ where
             let watcher_config = Arc::clone(&config);
             let watcher_queue = queue.clone();
             let watcher_control = Arc::clone(&queue_control);
-            let watcher_default_config = queue_default_config;
+            let watcher_base_queue_key = base_queue_key.clone();
+            let watcher_default_runtime_config = default_runtime_config.clone();
             tokio::spawn(async move {
                 if let Err(e) = run_queue_config_watcher(
                     watcher_config,
                     watcher_queue,
-                    watcher_default_config,
+                    watcher_base_queue_key,
+                    watcher_default_runtime_config,
                     queue_concurrency,
                     watcher_control,
                 )
@@ -721,10 +709,42 @@ where
     }
 }
 
+async fn runtime_queue_config<DT, ET>(
+    config: &Config<DT, ET>,
+    queue_key: &str,
+    base_queue_key: &str,
+    default_runtime_config: QueueRuntimeConfig,
+) -> Result<QueueRuntimeConfig, OxanaError>
+where
+    DT: Send + Sync + Clone + 'static,
+    ET: std::error::Error + Send + Sync + 'static,
+{
+    if queue_key == base_queue_key {
+        return config
+            .storage
+            .internal
+            .queue_config_or_default(queue_key, default_runtime_config)
+            .await;
+    }
+
+    let base_runtime_config = config
+        .storage
+        .internal
+        .queue_config_or_default(base_queue_key, default_runtime_config)
+        .await?;
+
+    config
+        .storage
+        .internal
+        .queue_config_or_default(queue_key, base_runtime_config)
+        .await
+}
+
 async fn run_queue_config_watcher<DT, ET>(
     config: Arc<Config<DT, ET>>,
     queue_key: String,
-    default_config: QueueRuntimeConfig,
+    base_queue_key: String,
+    default_runtime_config: QueueRuntimeConfig,
     queue_concurrency: crate::QueueConcurrency,
     queue_control: Arc<crate::semaphores_map::QueueControl>,
 ) -> Result<(), OxanaError>
@@ -742,11 +762,13 @@ where
             }
             _ = interval.tick() => {
                 if let Some(runtime_config) = config.storage.internal.track_redis_result(
-                    config
-                        .storage
-                        .internal
-                        .ensure_queue_config(&queue_key, default_config.clone())
-                        .await,
+                    runtime_queue_config(
+                        &config,
+                        &queue_key,
+                        &base_queue_key,
+                        default_runtime_config.clone(),
+                    )
+                    .await,
                 )? {
                     let runtime_config = queue_concurrency.effective_runtime_config(runtime_config);
                     queue_control.apply_config(runtime_config);
