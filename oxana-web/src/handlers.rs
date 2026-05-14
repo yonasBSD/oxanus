@@ -758,18 +758,8 @@ fn queue_concurrency_status_from_map(
         };
     }
 
-    match stored_configs
-        .get(base_key)
-        .and_then(|config| config.concurrency)
-    {
-        Some(concurrency) if concurrency != configured_default => {
-            QueueConcurrencyStatus::InheritedOverride {
-                default: configured_default,
-            }
-        }
-        _ => QueueConcurrencyStatus::Default {
-            default: configured_default,
-        },
+    QueueConcurrencyStatus::Default {
+        default: inherited_default,
     }
 }
 
@@ -1417,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_child_queue_reports_inherited_base_concurrency_override() {
+    fn dynamic_child_queue_treats_inherited_base_concurrency_as_default() {
         let mut dynamic_queue = queue_info("tenant", true);
         dynamic_queue.concurrency = 3;
         dynamic_queue.dynamic_concurrency = true;
@@ -1437,10 +1427,7 @@ mod tests {
 
         let status = queue_concurrency_status_from_map(&catalog, &stored_configs, "tenant#acme");
 
-        assert_eq!(
-            status,
-            QueueConcurrencyStatus::InheritedOverride { default: 3 }
-        );
+        assert_eq!(status, QueueConcurrencyStatus::Default { default: 5 });
     }
 
     #[test]

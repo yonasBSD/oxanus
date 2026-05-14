@@ -10,7 +10,6 @@ pub(crate) enum QueueConcurrencyStatus {
     Fixed,
     Default { default: usize },
     Override { default: usize },
-    InheritedOverride { default: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -30,8 +29,7 @@ impl QueueRuntimeConfigView {
         match self.concurrency_status {
             QueueConcurrencyStatus::Fixed => self.concurrency_label(),
             QueueConcurrencyStatus::Default { default }
-            | QueueConcurrencyStatus::Override { default }
-            | QueueConcurrencyStatus::InheritedOverride { default } => default.to_string(),
+            | QueueConcurrencyStatus::Override { default } => default.to_string(),
         }
     }
 
@@ -43,7 +41,6 @@ impl QueueRuntimeConfigView {
         matches!(
             self.concurrency_status,
             QueueConcurrencyStatus::Override { .. }
-                | QueueConcurrencyStatus::InheritedOverride { .. }
         )
     }
 }
