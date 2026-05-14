@@ -354,6 +354,11 @@ impl Storage {
         self.internal.set_queue_config(&queue_key, config).await
     }
 
+    /// Removes any persisted runtime config for a queue.
+    pub async fn reset_queue_config(&self, queue: impl Queue) -> Result<(), OxanaError> {
+        self.internal.reset_queue_config(&queue.key()).await
+    }
+
     /// Updates the runtime concurrency for a queue without restarting workers.
     pub async fn set_queue_concurrency(
         &self,

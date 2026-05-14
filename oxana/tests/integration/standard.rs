@@ -194,6 +194,12 @@ pub async fn test_dynamic_queue_unsets_runtime_concurrency_when_default_is_set()
     assert_eq!(config.concurrency, None);
     assert_eq!(config.state, oxana::QueueState::Paused);
 
+    storage.reset_queue_config(DynamicConcurrencyQueue).await?;
+    let configs = storage
+        .queue_configs(std::slice::from_ref(&queue_key))
+        .await?;
+    assert!(configs.is_empty());
+
     Ok(())
 }
 

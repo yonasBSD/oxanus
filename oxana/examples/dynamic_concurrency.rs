@@ -42,15 +42,7 @@ pub async fn main() -> Result<(), oxana::OxanaError> {
     let ctx = oxana::ContextValue::new(WorkerContext {});
     let storage = oxana::Storage::builder().build_from_env()?;
 
-    storage
-        .set_queue_config(
-            DynamicConcurrencyQueue,
-            &oxana::QueueRuntimeConfig {
-                concurrency: Some(1),
-                state: oxana::QueueState::Active,
-            },
-        )
-        .await?;
+    storage.reset_queue_config(DynamicConcurrencyQueue).await?;
 
     let config = ComponentRegistry::build_config(&storage).exit_when_processed(30);
 

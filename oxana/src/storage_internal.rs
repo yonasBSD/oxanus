@@ -260,6 +260,12 @@ impl StorageInternal {
         Ok(())
     }
 
+    pub async fn reset_queue_config(&self, queue: &str) -> Result<(), OxanaError> {
+        let mut redis = self.connection().await?;
+        let _: () = (*redis).hdel(&self.keys.queue_configs, queue).await?;
+        Ok(())
+    }
+
     pub async fn set_queue_state(&self, queue: &str, state: QueueState) -> Result<(), OxanaError> {
         let mut config = self.queue_config(queue).await?.unwrap_or_default();
         config.state = state;
@@ -2427,6 +2433,9 @@ mod tests {
 
         let configs = storage.queue_configs(std::slice::from_ref(&queue)).await?;
         assert_eq!(configs.get(&queue), Some(&preserved));
+
+        storage.reset_queue_config(&queue).await?;
+        assert_eq!(storage.queue_config(&queue).await?, None);
 
         Ok(())
     }
