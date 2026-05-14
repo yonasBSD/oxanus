@@ -28,6 +28,54 @@ fn concurrency_for(concurrency_map: &HashMap<String, usize>, key: &str) -> Strin
         .map_or_else(|| "—".to_string(), |c| c.to_string())
 }
 
+fn metrics_chart_bucket_minutes(window_minutes: usize) -> usize {
+    match window_minutes {
+        0..=120 => 1,
+        121..=480 => 5,
+        _ => 15,
+    }
+}
+
+fn downsample_job_metrics_points(
+    points: &[oxana::JobMetricsPoint],
+    window_minutes: usize,
+) -> Vec<oxana::JobMetricsPoint> {
+    let bucket_minutes = metrics_chart_bucket_minutes(window_minutes);
+    if bucket_minutes == 1 {
+        return points.to_vec();
+    }
+
+    points
+        .chunks(bucket_minutes)
+        .map(|chunk| {
+            let timestamp = chunk.first().map_or(0, |point| point.timestamp);
+            chunk.iter().fold(
+                oxana::JobMetricsPoint {
+                    timestamp,
+                    ..Default::default()
+                },
+                |mut sum, point| {
+                    sum.processed = sum.processed.saturating_add(point.processed);
+                    sum.succeeded = sum.succeeded.saturating_add(point.succeeded);
+                    sum.failed = sum.failed.saturating_add(point.failed);
+                    sum.panicked = sum.panicked.saturating_add(point.panicked);
+                    sum.successful_executions = sum
+                        .successful_executions
+                        .saturating_add(point.successful_executions);
+                    sum.failed_executions = sum
+                        .failed_executions
+                        .saturating_add(point.failed_executions);
+                    sum.panicked_executions = sum
+                        .panicked_executions
+                        .saturating_add(point.panicked_executions);
+                    sum.execution_ms = sum.execution_ms.saturating_add(point.execution_ms);
+                    sum
+                },
+            )
+        })
+        .collect()
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "dashboard.html")]
 pub(crate) struct DashboardTemplate {
@@ -310,18 +358,16 @@ impl MetricsTemplate {
     }
 
     fn summary_chart_data_json(&self, value: impl Fn(&oxana::JobMetricsPoint) -> f64) -> String {
-        let timestamps: Vec<i64> = self
-            .metrics
-            .series
-            .iter()
-            .map(|point| point.timestamp)
-            .collect();
+        let summary_points =
+            downsample_job_metrics_points(&self.metrics.series, self.metrics.minutes);
+        let timestamps: Vec<i64> = summary_points.iter().map(|point| point.timestamp).collect();
         let series: Vec<serde_json::Value> = self
             .metrics
             .workers
             .iter()
             .map(|worker| {
-                let data: Vec<f64> = worker.series.iter().map(&value).collect();
+                let points = downsample_job_metrics_points(&worker.series, self.metrics.minutes);
+                let data: Vec<f64> = points.iter().map(&value).collect();
                 serde_json::json!({
                     "label": metric_identity_label(&worker.identity),
                     "fullLabel": worker.identity.worker,
@@ -340,7 +386,7 @@ impl MetricsTemplate {
 
 #[cfg(test)]
 mod metrics_template_tests {
-    use super::MetricsTemplate;
+    use super::{MetricDetailTemplate, MetricsTemplate, metrics_chart_bucket_minutes};
 
     fn metrics_template(sort: &str, dir: &str) -> MetricsTemplate {
         MetricsTemplate {
@@ -360,6 +406,50 @@ mod metrics_template_tests {
         }
     }
 
+    fn metric_detail_template(
+        minutes: usize,
+        series: Vec<oxana::JobMetricsPoint>,
+    ) -> MetricDetailTemplate {
+        MetricDetailTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/metrics",
+            metrics: oxana::JobMetricsDetail {
+                identity: oxana::MetricIdentity {
+                    worker: "Worker".to_string(),
+                },
+                starts_at: 0,
+                ends_at: 0,
+                minutes,
+                totals: oxana::JobMetricsTotals::default(),
+                series,
+                histogram: Vec::new(),
+            },
+        }
+    }
+
+    fn metric_point(
+        idx: usize,
+        processed: u64,
+        successful_executions: u64,
+        failed_executions_without_panics: u64,
+        panicked_executions: u64,
+        execution_ms: u64,
+    ) -> oxana::JobMetricsPoint {
+        let failed_executions =
+            failed_executions_without_panics.saturating_add(panicked_executions);
+        oxana::JobMetricsPoint {
+            timestamp: 60 + i64::try_from(idx).unwrap_or(0) * 60,
+            processed,
+            succeeded: processed.saturating_sub(failed_executions),
+            failed: failed_executions,
+            panicked: panicked_executions,
+            successful_executions,
+            failed_executions,
+            panicked_executions,
+            execution_ms,
+        }
+    }
+
     fn worker_metrics(worker: &str, execution_ms: u64) -> oxana::WorkerMetricsSummary {
         oxana::WorkerMetricsSummary {
             identity: oxana::MetricIdentity {
@@ -370,13 +460,17 @@ mod metrics_template_tests {
                 successful_executions: 1,
                 ..oxana::JobMetricsTotals::default()
             },
-            series: vec![oxana::JobMetricsPoint {
-                timestamp: 60,
-                execution_ms,
-                successful_executions: 1,
-                ..oxana::JobMetricsPoint::default()
-            }],
+            series: vec![metric_point(0, 1, 1, 0, 0, execution_ms)],
         }
+    }
+
+    #[test]
+    fn metrics_chart_bucket_policy_matches_selected_windows() {
+        assert_eq!(metrics_chart_bucket_minutes(60), 1);
+        assert_eq!(metrics_chart_bucket_minutes(120), 1);
+        assert_eq!(metrics_chart_bucket_minutes(240), 5);
+        assert_eq!(metrics_chart_bucket_minutes(480), 5);
+        assert_eq!(metrics_chart_bucket_minutes(1440), 15);
     }
 
     #[test]
@@ -432,6 +526,94 @@ mod metrics_template_tests {
         assert_eq!(payload["series"][0]["fullLabel"], "ChartFirst");
         assert_eq!(payload["series"][1]["fullLabel"], "ChartSecond");
     }
+
+    #[test]
+    fn metrics_chart_data_downsamples_four_hour_window_to_five_minute_buckets() {
+        let mut template = metrics_template("processed", "desc");
+        template.metrics.minutes = 240;
+        let series: Vec<oxana::JobMetricsPoint> = (0..10)
+            .map(|idx| {
+                let value = u64::try_from(idx + 1).unwrap_or(0);
+                metric_point(idx, value, 1, 0, 0, value * 1000)
+            })
+            .collect();
+        template.metrics.series = series.clone();
+        template.metrics.workers = vec![oxana::WorkerMetricsSummary {
+            identity: oxana::MetricIdentity {
+                worker: "Worker".to_string(),
+            },
+            totals: oxana::JobMetricsTotals::default(),
+            series,
+        }];
+
+        let execution_payload: serde_json::Value =
+            serde_json::from_str(&template.execution_chart_data_json()).unwrap();
+        let processed_payload: serde_json::Value =
+            serde_json::from_str(&template.processed_chart_data_json()).unwrap();
+
+        assert_eq!(
+            execution_payload["timestamps"],
+            serde_json::json!([60, 360])
+        );
+        assert_eq!(
+            processed_payload["timestamps"],
+            serde_json::json!([60, 360])
+        );
+        assert_eq!(
+            execution_payload["series"][0]["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_f64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![15.0, 40.0]
+        );
+        assert_eq!(
+            processed_payload["series"][0]["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_f64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![15.0, 40.0]
+        );
+    }
+
+    #[test]
+    fn metric_detail_chart_data_downsamples_24_hour_window_to_fifteen_minute_buckets() {
+        let template = metric_detail_template(
+            1440,
+            (0..30)
+                .map(|idx| {
+                    if idx < 15 {
+                        metric_point(idx, 1, 1, 0, 0, 100)
+                    } else {
+                        metric_point(idx, 2, 2, 0, 0, 600)
+                    }
+                })
+                .collect(),
+        );
+
+        let average_payload: serde_json::Value =
+            serde_json::from_str(&template.detail_average_chart_data_json()).unwrap();
+        let total_payload: serde_json::Value =
+            serde_json::from_str(&template.detail_total_chart_data_json()).unwrap();
+
+        assert_eq!(average_payload[0], serde_json::json!([60, 960]));
+        assert_eq!(
+            average_payload[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_f64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![100.0, 300.0]
+        );
+        assert_eq!(total_payload[0], serde_json::json!([60, 960]));
+        assert_eq!(total_payload[1], serde_json::json!([15, 30]));
+        assert_eq!(total_payload[2], serde_json::json!([0, 0]));
+        assert_eq!(total_payload[3], serde_json::json!([0, 0]));
+    }
 }
 
 fn metric_identity_label(identity: &oxana::MetricIdentity) -> String {
@@ -453,15 +635,9 @@ pub(crate) struct MetricDetailTemplate {
 
 impl MetricDetailTemplate {
     pub fn detail_average_chart_data_json(&self) -> String {
-        let timestamps: Vec<i64> = self
-            .metrics
-            .series
-            .iter()
-            .map(|point| point.timestamp)
-            .collect();
-        let average_ms: Vec<f64> = self
-            .metrics
-            .series
+        let points = downsample_job_metrics_points(&self.metrics.series, self.metrics.minutes);
+        let timestamps: Vec<i64> = points.iter().map(|point| point.timestamp).collect();
+        let average_ms: Vec<f64> = points
             .iter()
             .map(oxana::JobMetricsPoint::average_execution_ms)
             .collect();
@@ -470,27 +646,17 @@ impl MetricDetailTemplate {
     }
 
     pub fn detail_total_chart_data_json(&self) -> String {
-        let timestamps: Vec<i64> = self
-            .metrics
-            .series
-            .iter()
-            .map(|point| point.timestamp)
-            .collect();
-        let succeeded: Vec<u64> = self
-            .metrics
-            .series
+        let points = downsample_job_metrics_points(&self.metrics.series, self.metrics.minutes);
+        let timestamps: Vec<i64> = points.iter().map(|point| point.timestamp).collect();
+        let succeeded: Vec<u64> = points
             .iter()
             .map(|point| point.successful_executions)
             .collect();
-        let failed_without_panics: Vec<u64> = self
-            .metrics
-            .series
+        let failed_without_panics: Vec<u64> = points
             .iter()
             .map(oxana::JobMetricsPoint::failed_executions_without_panics)
             .collect();
-        let panicked: Vec<u64> = self
-            .metrics
-            .series
+        let panicked: Vec<u64> = points
             .iter()
             .map(|point| point.panicked_executions)
             .collect();

@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Make dashboard queue and metrics views more operationally useful: queue length charts now live with queue stats, tooltips use readable worker labels, zero-value tooltip rows are hidden, and unknown ETAs sort after known drain times.
+- Add a 24-hour window to job metrics views, retain metrics long enough to back it, and downsample long-window chart payloads.
 - Show progress-aware job state and ETA estimates in the dashboard while preserving cursor-only resumable state as raw job state.
 - Reduce Redis pressure by replacing `KEYS` with cursor-based `SCAN`, batching result counter writes, and snapshotting active queue lengths during worker refreshes.
 - Improve on-demand registration so the dashboard can prefill arguments, keep job hooks intact, and choose a sensible default queue.

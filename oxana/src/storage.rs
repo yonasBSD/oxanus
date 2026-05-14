@@ -288,8 +288,8 @@ impl Storage {
 
     /// Returns Sidekiq-style job execution metrics for all workers.
     ///
-    /// Metrics are retained for up to 8 hours. The query defaults to 60 minutes
-    /// and is clamped to 480 minutes.
+    /// Metrics are retained for up to 24 hours. The query defaults to 60 minutes
+    /// and is clamped to 1440 minutes.
     pub async fn job_metrics(
         &self,
         query: JobMetricsQuery,
