@@ -5,9 +5,9 @@ use std::collections::HashMap;
 
 use crate::result_collector::{WorkerResult, WorkerResultKind};
 
-pub(crate) const METRICS_RETENTION_SECS: i64 = 8 * 60 * 60;
+pub(crate) const METRICS_RETENTION_SECS: i64 = 24 * 60 * 60;
 pub(crate) const DEFAULT_METRIC_MINUTES: usize = 60;
-pub(crate) const MAX_METRIC_MINUTES: usize = 8 * 60;
+pub(crate) const MAX_METRIC_MINUTES: usize = 24 * 60;
 pub(crate) const QUEUE_RATE_WINDOW_MINUTES: usize = 10;
 pub(crate) const HISTOGRAM_BUCKET_COUNT: usize = 14;
 
@@ -743,7 +743,7 @@ mod tests {
         let other = MetricIdentity {
             worker: "WorkerB".to_string(),
         };
-        let minutes = metric_minutes(10_000, JobMetricsQuery::new(999));
+        let minutes = metric_minutes(10_000, JobMetricsQuery::new(10_000));
         assert_eq!(minutes.len(), MAX_METRIC_MINUTES);
 
         let mut hashes = vec![HashMap::new(); minutes.len()];

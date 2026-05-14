@@ -277,7 +277,7 @@ async fn test_job_metrics_record_job_counts_execution_counts_and_ttls() -> TestR
     for key in keys {
         let ttl: i64 = redis.ttl(&key).await?;
         assert!(ttl > 0);
-        assert!(ttl <= 8 * 60 * 60);
+        assert!(ttl <= 24 * 60 * 60);
     }
 
     Ok(())
