@@ -14,13 +14,37 @@
 
         {% include "_tabs.html" %}
 
-        <div class="flex items-center justify-between mb-6">
-            <div class="flex items-center gap-3">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+            <div class="flex flex-wrap items-center gap-3">
                 <h2 class="text-lg font-semibold font-mono">{{ queue_key }}</h2>
+                <span class="px-2.5 py-1 rounded border text-xs font-medium {{ self.state_class() }}">{{ self.state_label() }}</span>
+                <span class="px-2.5 py-1 rounded border border-gray-800 bg-gray-900 text-gray-300 text-xs">
+                    Concurrency: {{ self.concurrency_label() }}
+                    {% if self.has_concurrency_override() %}
+                    <span class="text-gray-500">(<span class="line-through">{{ self.concurrency_default_label() }}</span>)</span>
+                    {% endif %}
+                </span>
             </div>
-            <form method="POST" action="{{ base_path }}/queues/{{ queue_key|urlencode }}/wipe" onsubmit="return confirmWipe('{{ queue_key }}')">
-                <button type="submit" class="px-3 py-1.5 rounded bg-red-900/50 border border-red-800 hover:bg-red-800 text-red-300 text-sm transition-colors">Wipe Queue</button>
-            </form>
+            <div class="flex flex-wrap items-center gap-2">
+                {% if self.can_change_concurrency() %}
+                <form method="POST" action="{{ self.queue_action_path("concurrency") }}" onsubmit="return promptConcurrency(this)" data-queue-key="{{ queue_key }}" data-current-concurrency="{{ self.concurrency_label() }}" data-default-concurrency="{{ self.concurrency_default_label() }}">
+                    <input type="hidden" name="concurrency" value="">
+                    <button type="submit" class="px-3 py-1.5 rounded bg-gray-800 border border-gray-700 hover:bg-gray-700 text-gray-300 text-sm transition-colors">Change concurrency</button>
+                </form>
+                {% endif %}
+                {% if self.is_paused() %}
+                <form method="POST" action="{{ base_path }}/queues/{{ queue_key|urlencode }}/unpause">
+                    <button type="submit" class="px-3 py-1.5 rounded bg-green-900/50 border border-green-800 hover:bg-green-800 text-green-300 text-sm transition-colors">Unpause</button>
+                </form>
+                {% else %}
+                <form method="POST" action="{{ base_path }}/queues/{{ queue_key|urlencode }}/pause">
+                    <button type="submit" class="px-3 py-1.5 rounded bg-yellow-900/50 border border-yellow-800 hover:bg-yellow-800 text-yellow-300 text-sm transition-colors">Pause</button>
+                </form>
+                {% endif %}
+                <form method="POST" action="{{ base_path }}/queues/{{ queue_key|urlencode }}/wipe" onsubmit="return confirmWipe('{{ queue_key }}')">
+                    <button type="submit" class="px-3 py-1.5 rounded bg-red-900/50 border border-red-800 hover:bg-red-800 text-red-300 text-sm transition-colors">Wipe</button>
+                </form>
+            </div>
         </div>
 
         {% match queue_stats %}
@@ -240,6 +264,31 @@
         {% endif %}
     </div>
     <script>
+        function promptConcurrency(form) {
+            var current = form.dataset.currentConcurrency || '';
+            var defaultConcurrency = form.dataset.defaultConcurrency || '';
+            var queueKey = form.dataset.queueKey || 'queue';
+            var promptText = 'Set concurrency for ' + queueKey;
+
+            if (defaultConcurrency) {
+                promptText += ' (default ' + defaultConcurrency + ')';
+            }
+
+            var input = prompt(promptText, current);
+            if (input === null) {
+                return false;
+            }
+
+            input = input.trim();
+            if (!/^[1-9][0-9]*$/.test(input)) {
+                alert('Concurrency must be a positive integer.');
+                return false;
+            }
+
+            form.elements.concurrency.value = input;
+            return true;
+        }
+
         function confirmWipe(queueKey) {
             var input = prompt('Type the queue name to confirm wipe: ' + queueKey);
             return input === queueKey;

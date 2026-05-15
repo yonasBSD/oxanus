@@ -5,6 +5,46 @@ use std::collections::HashMap;
 use crate::JOBS_PER_PAGE;
 use crate::filters;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum QueueConcurrencyStatus {
+    Fixed,
+    Default { default: usize },
+    Override { default: usize },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct QueueRuntimeConfigView {
+    pub config: oxana::QueueRuntimeConfig,
+    pub concurrency_status: QueueConcurrencyStatus,
+}
+
+impl QueueRuntimeConfigView {
+    fn concurrency_label(&self) -> String {
+        self.config
+            .concurrency
+            .map_or_else(|| "-".to_string(), |concurrency| concurrency.to_string())
+    }
+
+    fn concurrency_default_label(&self) -> String {
+        match self.concurrency_status {
+            QueueConcurrencyStatus::Fixed => self.concurrency_label(),
+            QueueConcurrencyStatus::Default { default }
+            | QueueConcurrencyStatus::Override { default } => default.to_string(),
+        }
+    }
+
+    fn can_change_concurrency(&self) -> bool {
+        !matches!(self.concurrency_status, QueueConcurrencyStatus::Fixed)
+    }
+
+    fn has_concurrency_override(&self) -> bool {
+        matches!(
+            self.concurrency_status,
+            QueueConcurrencyStatus::Override { .. }
+        )
+    }
+}
+
 fn busy_for(stats: &oxana::Stats, key: &str) -> usize {
     stats
         .processing
@@ -22,10 +62,55 @@ fn busy_for_process(stats: &oxana::Stats, process: &oxana::Process) -> usize {
         .count()
 }
 
-fn concurrency_for(concurrency_map: &HashMap<String, usize>, key: &str) -> String {
-    concurrency_map
+fn concurrency_for(queue_configs: &HashMap<String, QueueRuntimeConfigView>, key: &str) -> String {
+    queue_configs.get(key).map_or_else(
+        || "-".to_string(),
+        QueueRuntimeConfigView::concurrency_label,
+    )
+}
+
+fn default_concurrency_for(
+    queue_configs: &HashMap<String, QueueRuntimeConfigView>,
+    key: &str,
+) -> String {
+    queue_configs
         .get(key)
-        .map_or_else(|| "—".to_string(), |c| c.to_string())
+        .map_or_else(String::new, |config| config.concurrency_default_label())
+}
+
+fn has_concurrency_override_for(
+    queue_configs: &HashMap<String, QueueRuntimeConfigView>,
+    key: &str,
+) -> bool {
+    queue_configs
+        .get(key)
+        .is_some_and(QueueRuntimeConfigView::has_concurrency_override)
+}
+
+fn state_for(queue_configs: &HashMap<String, QueueRuntimeConfigView>, key: &str) -> String {
+    queue_configs.get(key).map_or_else(
+        || "Active".to_string(),
+        |config| config.config.state.label().to_string(),
+    )
+}
+
+fn state_class_for(
+    queue_configs: &HashMap<String, QueueRuntimeConfigView>,
+    key: &str,
+) -> &'static str {
+    match queue_configs.get(key).map(|config| config.config.state) {
+        Some(oxana::QueueState::Paused) => "text-yellow-300",
+        _ => "text-green-300",
+    }
+}
+
+fn queue_action_path(base_path: &str, key: &str, action: &str) -> String {
+    format!(
+        "{}/queues/{}/{}",
+        base_path,
+        urlencoding::encode(key),
+        action
+    )
 }
 
 fn metrics_chart_bucket_minutes(window_minutes: usize) -> usize {
@@ -82,12 +167,32 @@ pub(crate) struct DashboardTemplate {
     pub base_path: String,
     pub active_tab: &'static str,
     pub stats: oxana::Stats,
-    pub concurrency_map: HashMap<String, usize>,
+    pub queue_configs: HashMap<String, QueueRuntimeConfigView>,
 }
 
 impl DashboardTemplate {
     pub fn concurrency_for(&self, key: &str) -> String {
-        concurrency_for(&self.concurrency_map, key)
+        concurrency_for(&self.queue_configs, key)
+    }
+
+    pub fn default_concurrency_for(&self, key: &str) -> String {
+        default_concurrency_for(&self.queue_configs, key)
+    }
+
+    pub fn has_concurrency_override_for(&self, key: &str) -> bool {
+        has_concurrency_override_for(&self.queue_configs, key)
+    }
+
+    pub fn state_for(&self, key: &str) -> String {
+        state_for(&self.queue_configs, key)
+    }
+
+    pub fn state_class_for(&self, key: &str) -> &'static str {
+        state_class_for(&self.queue_configs, key)
+    }
+
+    pub fn dynamic_queue_key(&self, key: &str, suffix: &str) -> String {
+        format!("{key}#{suffix}")
     }
 
     pub fn busy_for(&self, key: &str) -> usize {
@@ -105,12 +210,32 @@ pub(crate) struct BusyTemplate {
     pub base_path: String,
     pub active_tab: &'static str,
     pub stats: oxana::Stats,
-    pub concurrency_map: HashMap<String, usize>,
+    pub queue_configs: HashMap<String, QueueRuntimeConfigView>,
 }
 
 impl BusyTemplate {
     pub fn concurrency_for(&self, key: &str) -> String {
-        concurrency_for(&self.concurrency_map, key)
+        concurrency_for(&self.queue_configs, key)
+    }
+
+    pub fn default_concurrency_for(&self, key: &str) -> String {
+        default_concurrency_for(&self.queue_configs, key)
+    }
+
+    pub fn has_concurrency_override_for(&self, key: &str) -> bool {
+        has_concurrency_override_for(&self.queue_configs, key)
+    }
+
+    pub fn state_for(&self, key: &str) -> String {
+        state_for(&self.queue_configs, key)
+    }
+
+    pub fn state_class_for(&self, key: &str) -> &'static str {
+        state_class_for(&self.queue_configs, key)
+    }
+
+    pub fn dynamic_queue_key(&self, key: &str, suffix: &str) -> String {
+        format!("{key}#{suffix}")
     }
 
     pub fn busy_for(&self, key: &str) -> usize {
@@ -128,7 +253,7 @@ pub(crate) struct QueuesTemplate {
     pub base_path: String,
     pub active_tab: &'static str,
     pub stats: oxana::Stats,
-    pub concurrency_map: HashMap<String, usize>,
+    pub queue_configs: HashMap<String, QueueRuntimeConfigView>,
     pub queue_lengths: oxana::QueueLengthMetricsSnapshot,
     pub sort: String,
     pub dir: String,
@@ -166,7 +291,27 @@ impl QueuesTemplate {
     }
 
     pub fn concurrency_for(&self, key: &str) -> String {
-        concurrency_for(&self.concurrency_map, key)
+        concurrency_for(&self.queue_configs, key)
+    }
+
+    pub fn default_concurrency_for(&self, key: &str) -> String {
+        default_concurrency_for(&self.queue_configs, key)
+    }
+
+    pub fn has_concurrency_override_for(&self, key: &str) -> bool {
+        has_concurrency_override_for(&self.queue_configs, key)
+    }
+
+    pub fn state_for(&self, key: &str) -> String {
+        state_for(&self.queue_configs, key)
+    }
+
+    pub fn state_class_for(&self, key: &str) -> &'static str {
+        state_class_for(&self.queue_configs, key)
+    }
+
+    pub fn dynamic_queue_key(&self, key: &str, suffix: &str) -> String {
+        format!("{key}#{suffix}")
     }
 
     pub fn queue_length_chart_data_json(&self) -> String {
@@ -201,7 +346,8 @@ impl QueuesTemplate {
 
 #[cfg(test)]
 mod tests {
-    use super::QueuesTemplate;
+    use super::{QueueConcurrencyStatus, QueueRuntimeConfigView, QueuesTemplate};
+    use askama::Template;
     use std::collections::HashMap;
 
     fn queues_template(queue_lengths: oxana::QueueLengthMetricsSnapshot) -> QueuesTemplate {
@@ -223,10 +369,24 @@ mod tests {
                 processing: Vec::new(),
                 queues: Vec::new(),
             },
-            concurrency_map: HashMap::new(),
+            queue_configs: HashMap::new(),
             queue_lengths,
             sort: "key".to_string(),
             dir: "asc".to_string(),
+        }
+    }
+
+    fn queue_stats(key: &str) -> oxana::QueueStats {
+        oxana::QueueStats {
+            key: key.to_string(),
+            enqueued: 0,
+            processed: 0,
+            succeeded: 0,
+            panicked: 0,
+            failed: 0,
+            latency_s: 0.0,
+            rate: oxana::QueueRateStats::default(),
+            queues: Vec::new(),
         }
     }
 
@@ -288,6 +448,32 @@ mod tests {
             payload["series"],
             serde_json::json!([{ "label": "default", "data": [2, 5] }])
         );
+    }
+
+    #[test]
+    fn queues_template_renders_compact_concurrency_override_without_change_form() {
+        let mut template = queues_template(oxana::QueueLengthMetricsSnapshot {
+            starts_at: 0,
+            ends_at: 0,
+            minutes: 60,
+            queues: Vec::new(),
+        });
+        template.stats.queues = vec![queue_stats("emails")];
+        template.queue_configs.insert(
+            "emails".to_string(),
+            QueueRuntimeConfigView {
+                config: oxana::QueueRuntimeConfig::new(5),
+                concurrency_status: QueueConcurrencyStatus::Override { default: 2 },
+            },
+        );
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains(
+            "5 <span class=\"text-gray-500\">(<span class=\"line-through\">2</span>)</span>"
+        ));
+        assert!(!rendered.contains("action=\"/admin/queues/emails/concurrency\""));
+        assert!(!rendered.contains("data-default-concurrency=\"2\""));
     }
 }
 
@@ -768,6 +954,7 @@ pub(crate) struct QueueDetailTemplate {
     pub active_tab: &'static str,
     pub queue_key: String,
     pub queue_stats: Option<oxana::QueueStats>,
+    pub queue_config: QueueRuntimeConfigView,
     pub active_jobs: Vec<oxana::StatsProcessing>,
     pub busy: usize,
     pub jobs: Vec<oxana::JobEnvelope>,
@@ -777,6 +964,41 @@ pub(crate) struct QueueDetailTemplate {
 }
 
 impl QueueDetailTemplate {
+    pub fn state_label(&self) -> &'static str {
+        self.queue_config.config.state.label()
+    }
+
+    pub fn state_class(&self) -> &'static str {
+        match self.queue_config.config.state {
+            oxana::QueueState::Active => "text-green-300 border-green-800 bg-green-900/30",
+            oxana::QueueState::Paused => "text-yellow-300 border-yellow-800 bg-yellow-900/30",
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        matches!(self.queue_config.config.state, oxana::QueueState::Paused)
+    }
+
+    pub fn concurrency_label(&self) -> String {
+        self.queue_config.concurrency_label()
+    }
+
+    pub fn concurrency_default_label(&self) -> String {
+        self.queue_config.concurrency_default_label()
+    }
+
+    pub fn can_change_concurrency(&self) -> bool {
+        self.queue_config.can_change_concurrency()
+    }
+
+    pub fn has_concurrency_override(&self) -> bool {
+        self.queue_config.has_concurrency_override()
+    }
+
+    pub fn queue_action_path(&self, action: &str) -> String {
+        queue_action_path(&self.base_path, &self.queue_key, action)
+    }
+
     pub fn range_start(&self) -> usize {
         (self.page - 1) * JOBS_PER_PAGE + 1
     }

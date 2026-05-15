@@ -12,19 +12,21 @@ use crate::error::OxanaWebError;
 use crate::templates::{
     BusyTemplate, CronRow, CronTemplate, CronWorkerView, DashboardTemplate, GlobalJobsTemplate,
     JobDetailTemplate, JobListKind, MetricDetailTemplate, MetricsTemplate, OnDemandJobView,
-    OnDemandQueueView, OnDemandRow, OnDemandTemplate, QueueDetailTemplate, QueuesTemplate,
+    OnDemandQueueView, OnDemandRow, OnDemandTemplate, QueueConcurrencyStatus, QueueDetailTemplate,
+    QueueRuntimeConfigView, QueuesTemplate,
 };
 
 pub(crate) async fn dashboard(
     Extension(state): Extension<OxanaWebState>,
 ) -> Result<DashboardTemplate, OxanaWebError> {
     let stats = state.storage.stats().await?;
+    let queue_configs = queue_config_map(&state.storage, &state.catalog, &stats).await?;
 
     Ok(DashboardTemplate {
         base_path: state.base_path,
         active_tab: "",
         stats,
-        concurrency_map: state.concurrency_map,
+        queue_configs,
     })
 }
 
@@ -32,12 +34,13 @@ pub(crate) async fn busy(
     Extension(state): Extension<OxanaWebState>,
 ) -> Result<BusyTemplate, OxanaWebError> {
     let stats = state.storage.stats().await?;
+    let queue_configs = queue_config_map(&state.storage, &state.catalog, &stats).await?;
 
     Ok(BusyTemplate {
         base_path: state.base_path,
         active_tab: "/busy",
         stats,
-        concurrency_map: state.concurrency_map,
+        queue_configs,
     })
 }
 
@@ -46,6 +49,7 @@ pub(crate) async fn queues_list(
     Query(params): Query<QueuesParams>,
 ) -> Result<QueuesTemplate, OxanaWebError> {
     let mut stats = state.storage.stats().await?;
+    let queue_configs = queue_config_map(&state.storage, &state.catalog, &stats).await?;
     let query = oxana::JobMetricsQuery::new(params.minutes.unwrap_or(0));
     let queue_lengths = state.storage.queue_length_metrics(query).await?;
 
@@ -53,13 +57,13 @@ pub(crate) async fn queues_list(
     let dir = params.dir.as_deref().unwrap_or("asc");
     let desc = dir == "desc";
 
-    sort_queues(&mut stats.queues, &state.concurrency_map, sort, desc);
+    sort_queues(&mut stats.queues, &queue_configs, sort, desc);
 
     Ok(QueuesTemplate {
         base_path: state.base_path,
         active_tab: "/queues",
         stats,
-        concurrency_map: state.concurrency_map,
+        queue_configs,
         queue_lengths,
         sort: sort.to_string(),
         dir: dir.to_string(),
@@ -293,6 +297,7 @@ pub(crate) async fn queue_detail(
     let opts = list_opts(page);
 
     let stats = state.storage.stats().await?;
+    let queue_config = queue_runtime_config_for(&state, &queue_key).await?;
     let queue_stats = stats
         .queues
         .iter()
@@ -326,7 +331,7 @@ pub(crate) async fn queue_detail(
 
     let mut jobs = state
         .storage
-        .list_queue_jobs(RawQueue(queue_key.clone()), &opts)
+        .list_queue_jobs(RawQueue::fixed(queue_key.clone()), &opts)
         .await?;
 
     let has_next = jobs.len() > JOBS_PER_PAGE;
@@ -337,6 +342,7 @@ pub(crate) async fn queue_detail(
         active_tab: "/queues",
         queue_key,
         queue_stats,
+        queue_config,
         active_jobs,
         busy,
         jobs,
@@ -379,7 +385,7 @@ pub(crate) async fn wipe_queue(
 ) -> Result<Redirect, OxanaWebError> {
     state
         .storage
-        .wipe_queue(RawQueue(queue_key.clone()))
+        .wipe_queue(RawQueue::fixed(queue_key.clone()))
         .await?;
 
     Ok(Redirect::to(&format!(
@@ -387,6 +393,47 @@ pub(crate) async fn wipe_queue(
         state.base_path,
         urlencoding::encode(&queue_key)
     )))
+}
+
+pub(crate) async fn pause_queue(
+    Extension(state): Extension<OxanaWebState>,
+    Path(queue_key): Path<String>,
+) -> Result<Redirect, OxanaWebError> {
+    set_queue_state(&state, &queue_key, oxana::QueueState::Paused).await?;
+
+    Ok(queue_redirect(&state.base_path, &queue_key))
+}
+
+pub(crate) async fn unpause_queue(
+    Extension(state): Extension<OxanaWebState>,
+    Path(queue_key): Path<String>,
+) -> Result<Redirect, OxanaWebError> {
+    set_queue_state(&state, &queue_key, oxana::QueueState::Active).await?;
+
+    Ok(queue_redirect(&state.base_path, &queue_key))
+}
+
+pub(crate) async fn set_queue_concurrency(
+    Extension(state): Extension<OxanaWebState>,
+    Path(queue_key): Path<String>,
+    Form(form): Form<QueueConcurrencyForm>,
+) -> Result<Redirect, OxanaWebError> {
+    if form.concurrency == 0 {
+        return Err(oxana::OxanaError::ConfigError(
+            "Queue concurrency must be at least 1".to_string(),
+        )
+        .into());
+    }
+
+    state
+        .storage
+        .set_queue_concurrency(
+            RawQueue::from_catalog(&state.catalog, &queue_key),
+            form.concurrency,
+        )
+        .await?;
+
+    Ok(queue_redirect(&state.base_path, &queue_key))
 }
 
 pub(crate) async fn delete_job(
@@ -423,15 +470,68 @@ pub(crate) async fn enqueue_job(
 // --- Helpers ---
 
 #[derive(Serialize)]
-struct RawQueue(String);
+struct RawQueue {
+    key: String,
+    #[serde(skip_serializing)]
+    base_key: String,
+    #[serde(skip_serializing)]
+    dynamic: bool,
+    #[serde(skip_serializing)]
+    concurrency: oxana::QueueConcurrency,
+}
+
+impl RawQueue {
+    fn fixed(key: String) -> Self {
+        Self {
+            base_key: key.clone(),
+            key,
+            dynamic: false,
+            concurrency: oxana::QueueConcurrency::Fixed(1),
+        }
+    }
+
+    fn from_catalog(catalog: &oxana::Catalog, key: &str) -> Self {
+        let base_key = base_queue_key(key);
+        let queue_info = catalog.queues.iter().find(|queue| queue.key == base_key);
+        let concurrency = queue_info.map_or(oxana::QueueConcurrency::Fixed(1), |queue| {
+            if queue.dynamic_concurrency {
+                oxana::QueueConcurrency::Dynamic {
+                    default: queue.concurrency,
+                }
+            } else {
+                oxana::QueueConcurrency::Fixed(queue.concurrency)
+            }
+        });
+
+        Self {
+            key: key.to_string(),
+            base_key: base_key.to_string(),
+            dynamic: queue_info.is_some_and(|queue| queue.dynamic),
+            concurrency,
+        }
+    }
+}
 
 impl oxana::Queue for RawQueue {
     fn key(&self) -> String {
-        self.0.clone()
+        self.key.clone()
     }
 
     fn to_config() -> oxana::QueueConfig {
         oxana::QueueConfig::as_static("")
+    }
+
+    fn config(&self) -> oxana::QueueConfig {
+        let config = if self.dynamic {
+            oxana::QueueConfig::as_dynamic(self.base_key.clone())
+        } else {
+            oxana::QueueConfig::as_static(self.key.clone())
+        };
+
+        match self.concurrency {
+            oxana::QueueConcurrency::Fixed(concurrency) => config.concurrency(concurrency),
+            oxana::QueueConcurrency::Dynamic { default } => config.dynamic_concurrency(default),
+        }
     }
 }
 
@@ -496,6 +596,11 @@ pub(crate) struct OnDemandEnqueueJobForm {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct QueueConcurrencyForm {
+    concurrency: usize,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct OnDemandParams {
     #[serde(default)]
     scheduled: Option<String>,
@@ -516,9 +621,227 @@ fn list_opts(page: usize) -> oxana::QueueListOpts {
     }
 }
 
+async fn queue_config_map(
+    storage: &oxana::Storage,
+    catalog: &oxana::Catalog,
+    stats: &oxana::Stats,
+) -> Result<HashMap<String, QueueRuntimeConfigView>, oxana::OxanaError> {
+    let mut keys = queue_config_keys(catalog, stats);
+    keys.sort();
+    keys.dedup();
+
+    let stored_configs = storage.queue_configs(&keys).await?;
+
+    Ok(keys
+        .into_iter()
+        .map(|key| {
+            let config = queue_runtime_config_view_from_map(catalog, &stored_configs, &key);
+            (key, config)
+        })
+        .collect())
+}
+
+fn queue_config_keys(catalog: &oxana::Catalog, stats: &oxana::Stats) -> Vec<String> {
+    let mut keys = catalog
+        .queues
+        .iter()
+        .map(|queue| queue.key.clone())
+        .collect::<Vec<_>>();
+
+    for queue in &stats.queues {
+        keys.push(queue.key.clone());
+        keys.extend(
+            queue
+                .queues
+                .iter()
+                .map(|dynamic_queue| format!("{}#{}", queue.key, dynamic_queue.suffix)),
+        );
+    }
+
+    keys
+}
+
+fn merge_queue_runtime_config(
+    catalog: &oxana::Catalog,
+    queue_key: &str,
+    mut config: oxana::QueueRuntimeConfig,
+    default_config: oxana::QueueRuntimeConfig,
+) -> oxana::QueueRuntimeConfig {
+    if !queue_uses_dynamic_concurrency(catalog, queue_key) {
+        config.concurrency = None;
+    }
+
+    config.with_defaults(default_config)
+}
+
+fn queue_runtime_config_from_map(
+    catalog: &oxana::Catalog,
+    stored_configs: &HashMap<String, oxana::QueueRuntimeConfig>,
+    queue_key: &str,
+) -> oxana::QueueRuntimeConfig {
+    let base_key = base_queue_key(queue_key);
+    let base_default = default_queue_runtime_config(catalog, base_key);
+    let base_config = stored_configs
+        .get(base_key)
+        .cloned()
+        .map(|config| merge_queue_runtime_config(catalog, base_key, config, base_default.clone()))
+        .unwrap_or(base_default);
+
+    if queue_key == base_key {
+        return base_config;
+    }
+
+    stored_configs
+        .get(queue_key)
+        .cloned()
+        .map(|config| merge_queue_runtime_config(catalog, queue_key, config, base_config.clone()))
+        .unwrap_or(base_config)
+}
+
+fn queue_runtime_config_view_from_map(
+    catalog: &oxana::Catalog,
+    stored_configs: &HashMap<String, oxana::QueueRuntimeConfig>,
+    queue_key: &str,
+) -> QueueRuntimeConfigView {
+    let config = queue_runtime_config_from_map(catalog, stored_configs, queue_key);
+    let concurrency_status = queue_concurrency_status_from_map(catalog, stored_configs, queue_key);
+
+    QueueRuntimeConfigView {
+        config,
+        concurrency_status,
+    }
+}
+
+fn queue_concurrency_status_from_map(
+    catalog: &oxana::Catalog,
+    stored_configs: &HashMap<String, oxana::QueueRuntimeConfig>,
+    queue_key: &str,
+) -> QueueConcurrencyStatus {
+    if !queue_uses_dynamic_concurrency(catalog, queue_key) {
+        return QueueConcurrencyStatus::Fixed;
+    }
+
+    let base_key = base_queue_key(queue_key);
+    let configured_default = default_queue_runtime_config(catalog, base_key)
+        .concurrency
+        .unwrap_or(1);
+    let direct_concurrency = stored_configs
+        .get(queue_key)
+        .and_then(|config| config.concurrency);
+
+    if queue_key == base_key {
+        return match direct_concurrency {
+            Some(concurrency) if concurrency != configured_default => {
+                QueueConcurrencyStatus::Override {
+                    default: configured_default,
+                }
+            }
+            _ => QueueConcurrencyStatus::Default {
+                default: configured_default,
+            },
+        };
+    }
+
+    let inherited_default = queue_runtime_config_from_map(catalog, stored_configs, base_key)
+        .concurrency
+        .unwrap_or(configured_default);
+
+    if let Some(concurrency) = direct_concurrency {
+        return if concurrency != inherited_default {
+            QueueConcurrencyStatus::Override {
+                default: inherited_default,
+            }
+        } else {
+            QueueConcurrencyStatus::Default {
+                default: inherited_default,
+            }
+        };
+    }
+
+    QueueConcurrencyStatus::Default {
+        default: inherited_default,
+    }
+}
+
+fn queue_uses_dynamic_concurrency(catalog: &oxana::Catalog, queue_key: &str) -> bool {
+    let base_key = base_queue_key(queue_key);
+    catalog
+        .queues
+        .iter()
+        .find(|queue| queue.key == base_key)
+        .is_some_and(|queue| queue.dynamic_concurrency)
+}
+
+async fn queue_runtime_config_for(
+    state: &OxanaWebState,
+    queue_key: &str,
+) -> Result<QueueRuntimeConfigView, oxana::OxanaError> {
+    let keys = queue_runtime_config_keys(queue_key);
+    let stored_configs = state.storage.queue_configs(&keys).await?;
+
+    Ok(queue_runtime_config_view_from_map(
+        &state.catalog,
+        &stored_configs,
+        queue_key,
+    ))
+}
+
+fn queue_runtime_config_keys(queue_key: &str) -> Vec<String> {
+    let base_key = base_queue_key(queue_key);
+    if base_key == queue_key {
+        vec![base_key.to_string()]
+    } else {
+        vec![base_key.to_string(), queue_key.to_string()]
+    }
+}
+
+fn default_queue_runtime_config(
+    catalog: &oxana::Catalog,
+    queue_key: &str,
+) -> oxana::QueueRuntimeConfig {
+    let base_key = base_queue_key(queue_key);
+
+    catalog
+        .queues
+        .iter()
+        .find(|queue| queue.key == base_key)
+        .map_or_else(
+            || oxana::QueueRuntimeConfig::new(1),
+            |queue| oxana::QueueRuntimeConfig::new(queue.concurrency),
+        )
+}
+
+fn base_queue_key(queue_key: &str) -> &str {
+    queue_key
+        .split_once('#')
+        .map_or(queue_key, |(base, _)| base)
+}
+
+async fn set_queue_state(
+    state: &OxanaWebState,
+    queue_key: &str,
+    queue_state: oxana::QueueState,
+) -> Result<(), oxana::OxanaError> {
+    state
+        .storage
+        .set_queue_state(
+            RawQueue::from_catalog(&state.catalog, queue_key),
+            queue_state,
+        )
+        .await
+}
+
+fn queue_redirect(base_path: &str, queue_key: &str) -> Redirect {
+    Redirect::to(&format!(
+        "{}/queues/{}",
+        base_path,
+        urlencoding::encode(queue_key)
+    ))
+}
+
 fn sort_queues(
     queues: &mut [oxana::QueueStats],
-    concurrency_map: &HashMap<String, usize>,
+    queue_configs: &HashMap<String, QueueRuntimeConfigView>,
     sort: &str,
     desc: bool,
 ) {
@@ -538,10 +861,18 @@ fn sort_queues(
                     .partial_cmp(&b.rate.processed_per_minute)
                     .unwrap_or(std::cmp::Ordering::Equal),
                 "concurrency" => {
-                    let ca = concurrency_map.get(&a.key).copied().unwrap_or(0);
-                    let cb = concurrency_map.get(&b.key).copied().unwrap_or(0);
+                    let ca = queue_configs
+                        .get(&a.key)
+                        .and_then(|config| config.config.concurrency)
+                        .unwrap_or(0);
+                    let cb = queue_configs
+                        .get(&b.key)
+                        .and_then(|config| config.config.concurrency)
+                        .unwrap_or(0);
                     ca.cmp(&cb)
                 }
+                "state" => queue_state_order(queue_configs, &a.key)
+                    .cmp(&queue_state_order(queue_configs, &b.key)),
                 "latency" => a
                     .latency_s
                     .partial_cmp(&b.latency_s)
@@ -551,6 +882,13 @@ fn sort_queues(
             if desc { cmp.reverse() } else { cmp }
         }
     });
+}
+
+fn queue_state_order(queue_configs: &HashMap<String, QueueRuntimeConfigView>, key: &str) -> u8 {
+    match queue_configs.get(key).map(|config| config.config.state) {
+        Some(oxana::QueueState::Paused) => 1,
+        _ => 0,
+    }
 }
 
 fn valid_metric_sort(sort: &str) -> bool {
@@ -830,15 +1168,18 @@ fn build_on_demand_queue_views(queues: &[oxana::QueueInfo]) -> Vec<OnDemandQueue
 #[cfg(test)]
 mod tests {
     use super::{
-        CronEnqueueJobForm, OnDemandEnqueueJobForm, build_on_demand_queue_views,
-        cron_envelope_from_form, enqueue_on_demand_job, on_demand_envelope_from_form, sort_queues,
-        sorted_worker_metrics,
+        CronEnqueueJobForm, OnDemandEnqueueJobForm, RawQueue, build_on_demand_queue_views,
+        cron_envelope_from_form, enqueue_on_demand_job, on_demand_envelope_from_form,
+        queue_concurrency_status_from_map, queue_runtime_config_from_map,
+        queue_runtime_config_view_from_map, sort_queues, sorted_worker_metrics,
     };
     use crate::OxanaWebState;
+    use crate::templates::{QueueConcurrencyStatus, QueueRuntimeConfigView};
     use axum::Form;
     use axum::extract::Extension;
     use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
+    use oxana::Queue as _;
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::io::Error as WorkerError;
@@ -942,8 +1283,184 @@ mod tests {
             key: key.to_string(),
             dynamic,
             concurrency: 1,
+            dynamic_concurrency: false,
             throttle: None,
         }
+    }
+
+    fn queue_config_view(config: oxana::QueueRuntimeConfig) -> QueueRuntimeConfigView {
+        QueueRuntimeConfigView {
+            config,
+            concurrency_status: QueueConcurrencyStatus::Fixed,
+        }
+    }
+
+    #[test]
+    fn raw_queue_from_catalog_preserves_dynamic_concurrency_mode() {
+        let mut dynamic_queue = queue_info("tenant", true);
+        dynamic_queue.concurrency = 7;
+        dynamic_queue.dynamic_concurrency = true;
+        let catalog = oxana::Catalog {
+            workers: Vec::new(),
+            cron_workers: Vec::new(),
+            queues: vec![dynamic_queue],
+            on_demand_jobs: Vec::new(),
+        };
+
+        let queue = RawQueue::from_catalog(&catalog, "tenant#acme");
+        assert_eq!(queue.key(), "tenant#acme");
+        assert_eq!(
+            queue.config().concurrency,
+            oxana::QueueConcurrency::Dynamic { default: 7 }
+        );
+        assert!(matches!(
+            queue.config().kind,
+            oxana::QueueKind::Dynamic { ref prefix, .. } if prefix == "tenant"
+        ));
+    }
+
+    #[test]
+    fn dynamic_child_queue_inherits_base_runtime_override() {
+        let mut dynamic_queue = queue_info("tenant", true);
+        dynamic_queue.concurrency = 3;
+        dynamic_queue.dynamic_concurrency = true;
+        let catalog = oxana::Catalog {
+            workers: Vec::new(),
+            cron_workers: Vec::new(),
+            queues: vec![dynamic_queue],
+            on_demand_jobs: Vec::new(),
+        };
+        let stored_configs = HashMap::from([(
+            "tenant".to_string(),
+            oxana::QueueRuntimeConfig {
+                concurrency: Some(5),
+                state: oxana::QueueState::Paused,
+            },
+        )]);
+
+        let config = queue_runtime_config_from_map(&catalog, &stored_configs, "tenant#acme");
+
+        assert_eq!(config.concurrency, Some(5));
+        assert_eq!(config.state, oxana::QueueState::Paused);
+    }
+
+    #[test]
+    fn dynamic_child_queue_override_wins_over_base_runtime_override() {
+        let mut dynamic_queue = queue_info("tenant", true);
+        dynamic_queue.concurrency = 3;
+        dynamic_queue.dynamic_concurrency = true;
+        let catalog = oxana::Catalog {
+            workers: Vec::new(),
+            cron_workers: Vec::new(),
+            queues: vec![dynamic_queue],
+            on_demand_jobs: Vec::new(),
+        };
+        let stored_configs = HashMap::from([
+            (
+                "tenant".to_string(),
+                oxana::QueueRuntimeConfig {
+                    concurrency: Some(5),
+                    state: oxana::QueueState::Paused,
+                },
+            ),
+            (
+                "tenant#acme".to_string(),
+                oxana::QueueRuntimeConfig {
+                    concurrency: Some(9),
+                    state: oxana::QueueState::Active,
+                },
+            ),
+        ]);
+
+        let config = queue_runtime_config_from_map(&catalog, &stored_configs, "tenant#acme");
+
+        assert_eq!(config.concurrency, Some(9));
+        assert_eq!(config.state, oxana::QueueState::Active);
+    }
+
+    #[test]
+    fn dynamic_base_queue_reports_runtime_concurrency_override() {
+        let mut dynamic_queue = queue_info("tenant", true);
+        dynamic_queue.concurrency = 3;
+        dynamic_queue.dynamic_concurrency = true;
+        let catalog = oxana::Catalog {
+            workers: Vec::new(),
+            cron_workers: Vec::new(),
+            queues: vec![dynamic_queue],
+            on_demand_jobs: Vec::new(),
+        };
+        let stored_configs = HashMap::from([(
+            "tenant".to_string(),
+            oxana::QueueRuntimeConfig {
+                concurrency: Some(5),
+                state: oxana::QueueState::Active,
+            },
+        )]);
+
+        let view = queue_runtime_config_view_from_map(&catalog, &stored_configs, "tenant");
+
+        assert_eq!(view.config.concurrency, Some(5));
+        assert_eq!(
+            view.concurrency_status,
+            QueueConcurrencyStatus::Override { default: 3 }
+        );
+    }
+
+    #[test]
+    fn dynamic_child_queue_treats_inherited_base_concurrency_as_default() {
+        let mut dynamic_queue = queue_info("tenant", true);
+        dynamic_queue.concurrency = 3;
+        dynamic_queue.dynamic_concurrency = true;
+        let catalog = oxana::Catalog {
+            workers: Vec::new(),
+            cron_workers: Vec::new(),
+            queues: vec![dynamic_queue],
+            on_demand_jobs: Vec::new(),
+        };
+        let stored_configs = HashMap::from([(
+            "tenant".to_string(),
+            oxana::QueueRuntimeConfig {
+                concurrency: Some(5),
+                state: oxana::QueueState::Active,
+            },
+        )]);
+
+        let status = queue_concurrency_status_from_map(&catalog, &stored_configs, "tenant#acme");
+
+        assert_eq!(status, QueueConcurrencyStatus::Default { default: 5 });
+    }
+
+    #[test]
+    fn dynamic_child_queue_reports_direct_override_defaulting_to_base_concurrency() {
+        let mut dynamic_queue = queue_info("tenant", true);
+        dynamic_queue.concurrency = 3;
+        dynamic_queue.dynamic_concurrency = true;
+        let catalog = oxana::Catalog {
+            workers: Vec::new(),
+            cron_workers: Vec::new(),
+            queues: vec![dynamic_queue],
+            on_demand_jobs: Vec::new(),
+        };
+        let stored_configs = HashMap::from([
+            (
+                "tenant".to_string(),
+                oxana::QueueRuntimeConfig {
+                    concurrency: Some(5),
+                    state: oxana::QueueState::Active,
+                },
+            ),
+            (
+                "tenant#acme".to_string(),
+                oxana::QueueRuntimeConfig {
+                    concurrency: Some(9),
+                    state: oxana::QueueState::Active,
+                },
+            ),
+        ]);
+
+        let status = queue_concurrency_status_from_map(&catalog, &stored_configs, "tenant#acme");
+
+        assert_eq!(status, QueueConcurrencyStatus::Override { default: 5 });
     }
 
     #[test]
@@ -978,6 +1495,35 @@ mod tests {
             .map(|queue| queue.key.as_str())
             .collect::<Vec<_>>();
         assert_eq!(keys, vec!["never", "slow", "fast"]);
+    }
+
+    #[test]
+    fn state_sort_uses_runtime_queue_config() {
+        let mut queues = vec![
+            queue_with_eta("active", None),
+            queue_with_eta("paused", None),
+            queue_with_eta("missing", None),
+        ];
+        let mut queue_configs = HashMap::new();
+        queue_configs.insert(
+            "active".to_string(),
+            queue_config_view(oxana::QueueRuntimeConfig::new(1)),
+        );
+        queue_configs.insert(
+            "paused".to_string(),
+            queue_config_view(oxana::QueueRuntimeConfig {
+                concurrency: Some(1),
+                state: oxana::QueueState::Paused,
+            }),
+        );
+
+        sort_queues(&mut queues, &queue_configs, "state", false);
+
+        let keys = queues
+            .iter()
+            .map(|queue| queue.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["active", "missing", "paused"]);
     }
 
     fn worker_metrics(

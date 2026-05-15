@@ -7,7 +7,7 @@ use crate::{
         JobMetricsDetail, JobMetricsQuery, JobMetricsSnapshot, MetricIdentity,
         QueueLengthMetricsSnapshot,
     },
-    queue::Queue,
+    queue::{Queue, QueueConcurrency, QueueKind, QueueRuntimeConfig, QueueState},
     stats::{Process, QueueStats, Stats},
     storage_builder::StorageBuilder,
     storage_internal::StorageInternal,
@@ -321,6 +321,126 @@ impl Storage {
         self.internal.queue_length_metrics(query).await
     }
 
+    /// Returns the effective persisted runtime config for a queue, if one exists.
+    pub async fn queue_config(
+        &self,
+        queue: impl Queue,
+    ) -> Result<Option<QueueRuntimeConfig>, OxanaError> {
+        let queue_key = queue.key();
+        let concurrency = queue.config().concurrency;
+        Ok(self
+            .internal
+            .queue_config(&queue_key)
+            .await?
+            .map(|config| concurrency.effective_runtime_config(config)))
+    }
+
+    /// Returns persisted runtime configs for the provided queue keys.
+    pub async fn queue_configs(
+        &self,
+        queues: &[String],
+    ) -> Result<std::collections::HashMap<String, QueueRuntimeConfig>, OxanaError> {
+        self.internal.queue_configs(queues).await
+    }
+
+    /// Stores the full runtime config for a queue.
+    pub async fn set_queue_config(
+        &self,
+        queue: impl Queue,
+        config: &QueueRuntimeConfig,
+    ) -> Result<(), OxanaError> {
+        let queue_key = queue.key();
+        validate_runtime_concurrency(&queue_key, queue.config().concurrency, config)?;
+        self.internal.set_queue_config(&queue_key, config).await
+    }
+
+    /// Removes any persisted runtime config for a queue.
+    pub async fn reset_queue_config(&self, queue: impl Queue) -> Result<(), OxanaError> {
+        self.internal.reset_queue_config(&queue.key()).await
+    }
+
+    /// Updates the runtime concurrency for a queue without restarting workers.
+    pub async fn set_queue_concurrency(
+        &self,
+        queue: impl Queue,
+        concurrency: usize,
+    ) -> Result<(), OxanaError> {
+        let queue_key = queue.key();
+        let queue_config = queue.config();
+        let queue_concurrency = queue_config.concurrency;
+        validate_dynamic_concurrency(&queue_key, queue_concurrency)?;
+
+        let default_concurrency = self
+            .runtime_concurrency_reset_default(&queue_key, &queue_config.kind, queue_concurrency)
+            .await?;
+        let existing_config = self.internal.queue_config(&queue_key).await?;
+
+        if concurrency == default_concurrency && existing_config.is_none() {
+            return Ok(());
+        }
+
+        let mut config = existing_config.unwrap_or_default();
+        config.concurrency = (concurrency != default_concurrency).then_some(concurrency);
+
+        self.internal.set_queue_config(&queue_key, &config).await
+    }
+
+    async fn runtime_concurrency_reset_default(
+        &self,
+        queue_key: &str,
+        queue_kind: &QueueKind,
+        queue_concurrency: QueueConcurrency,
+    ) -> Result<usize, OxanaError> {
+        let configured_default = queue_concurrency.default_concurrency();
+        let QueueKind::Dynamic { prefix, .. } = queue_kind else {
+            return Ok(configured_default);
+        };
+
+        if queue_key == prefix {
+            return Ok(configured_default);
+        }
+
+        let base_config = self
+            .internal
+            .queue_config_or_default(prefix, queue_concurrency.stored_runtime_default())
+            .await?;
+
+        Ok(base_config.concurrency.unwrap_or(configured_default))
+    }
+
+    /// Updates the runtime processing state for a queue.
+    pub async fn set_queue_state(
+        &self,
+        queue: impl Queue,
+        state: QueueState,
+    ) -> Result<(), OxanaError> {
+        let queue_key = queue.key();
+        let concurrency = queue.config().concurrency;
+        if concurrency.is_dynamic() {
+            return self.internal.set_queue_state(&queue_key, state).await;
+        }
+
+        let mut config = self
+            .internal
+            .queue_config(&queue_key)
+            .await?
+            .unwrap_or_default();
+        config.concurrency = None;
+        config.state = state;
+
+        self.internal.set_queue_config(&queue_key, &config).await
+    }
+
+    /// Pauses job processing for a queue. Enqueueing is not affected.
+    pub async fn pause_queue(&self, queue: impl Queue) -> Result<(), OxanaError> {
+        self.set_queue_state(queue, QueueState::Paused).await
+    }
+
+    /// Resumes job processing for a paused queue.
+    pub async fn unpause_queue(&self, queue: impl Queue) -> Result<(), OxanaError> {
+        self.set_queue_state(queue, QueueState::Active).await
+    }
+
     /// Returns the list of processes that are currently running.
     ///
     /// # Returns
@@ -461,5 +581,30 @@ impl Storage {
     pub async fn metrics(&self) -> Result<PrometheusMetrics, OxanaError> {
         let stats = self.stats().await?;
         Ok(PrometheusMetrics::from_stats(&stats))
+    }
+}
+
+fn validate_runtime_concurrency(
+    queue_key: &str,
+    concurrency: QueueConcurrency,
+    config: &QueueRuntimeConfig,
+) -> Result<(), OxanaError> {
+    if config.concurrency.is_some() {
+        validate_dynamic_concurrency(queue_key, concurrency)?;
+    }
+
+    Ok(())
+}
+
+fn validate_dynamic_concurrency(
+    queue_key: &str,
+    concurrency: QueueConcurrency,
+) -> Result<(), OxanaError> {
+    if concurrency.is_dynamic() {
+        Ok(())
+    } else {
+        Err(OxanaError::ConfigError(format!(
+            "Queue {queue_key} has fixed concurrency and cannot be overridden"
+        )))
     }
 }
