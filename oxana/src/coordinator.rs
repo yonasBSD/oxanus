@@ -6,13 +6,13 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
 use crate::WorkerBatchConfig;
-use crate::config::Config;
 use crate::context::ContextValue;
 use crate::error::OxanaError;
 use crate::executor::{ExecutionError, ExecutionOutcome};
 use crate::job_envelope::JobEnvelope;
-use crate::queue::{QueueConfig, QueueKind, QueueRuntimeConfig};
+use crate::queue::{QueueConcurrency, QueueConfig, QueueKind, QueueRuntimeConfig};
 use crate::result_collector::{WorkerResult, WorkerResultKind};
+use crate::runtime::Runtime;
 use crate::semaphores_map::{QueueControlsMap, QueuePermit};
 use crate::worker_event::WorkerJob;
 use crate::{
@@ -20,15 +20,14 @@ use crate::{
     result_collector::{self, Stats},
 };
 
-pub async fn run<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+pub async fn run<DT>(
+    config: Arc<Runtime<DT>>,
     stats: Arc<Mutex<Stats>>,
     ctx: ContextValue<DT>,
     queue_config: QueueConfig,
 ) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let channel_capacity = queue_config.concurrency.default_concurrency().max(1);
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>(channel_capacity);
@@ -126,8 +125,8 @@ struct PendingJob {
     permit: QueuePermit,
 }
 
-async fn route_job<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn route_job<DT>(
+    config: Arc<Runtime<DT>>,
     ctx: ContextValue<DT>,
     result_tx: mpsc::Sender<WorkerResult>,
     batch_error_tx: mpsc::Sender<OxanaError>,
@@ -137,7 +136,6 @@ async fn route_job<DT, ET>(
 ) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let pending = match load_pending_job(Arc::clone(&config), job_event).await? {
         Some(pending) => pending,
@@ -163,13 +161,12 @@ where
     Ok(())
 }
 
-async fn load_pending_job<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn load_pending_job<DT>(
+    config: Arc<Runtime<DT>>,
     job_event: WorkerJob,
 ) -> Result<Option<PendingJob>, OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     tracing::trace!("Processing job: {:?}", job_event);
 
@@ -205,15 +202,14 @@ where
     }))
 }
 
-async fn process_pending_job<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn process_pending_job<DT>(
+    config: Arc<Runtime<DT>>,
     ctx: ContextValue<DT>,
     result_tx: mpsc::Sender<WorkerResult>,
     pending: PendingJob,
 ) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let mut envelope = pending.envelope;
     let job = match config
@@ -240,8 +236,8 @@ where
     Ok(())
 }
 
-async fn send_to_batcher<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn send_to_batcher<DT>(
+    config: Arc<Runtime<DT>>,
     ctx: ContextValue<DT>,
     result_tx: mpsc::Sender<WorkerResult>,
     batch_error_tx: mpsc::Sender<OxanaError>,
@@ -250,7 +246,6 @@ async fn send_to_batcher<DT, ET>(
     batch_config: WorkerBatchConfig,
 ) where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let key = BatchKey::from_envelope(&pending.envelope);
     let mut pending = pending;
@@ -279,8 +274,8 @@ async fn send_to_batcher<DT, ET>(
     }
 }
 
-fn spawn_batcher<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+fn spawn_batcher<DT>(
+    config: Arc<Runtime<DT>>,
     ctx: ContextValue<DT>,
     result_tx: mpsc::Sender<WorkerResult>,
     batch_error_tx: mpsc::Sender<OxanaError>,
@@ -288,7 +283,6 @@ fn spawn_batcher<DT, ET>(
 ) -> mpsc::Sender<PendingJob>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let batch_size = batch_config.size();
     let (tx, rx) = mpsc::channel(batch_size * 2);
@@ -310,8 +304,8 @@ where
     tx
 }
 
-async fn run_batcher<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn run_batcher<DT>(
+    config: Arc<Runtime<DT>>,
     ctx: ContextValue<DT>,
     result_tx: mpsc::Sender<WorkerResult>,
     batch_error_tx: mpsc::Sender<OxanaError>,
@@ -320,7 +314,6 @@ async fn run_batcher<DT, ET>(
 ) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let batch_size = batch_config.size();
     let mut pending = Vec::with_capacity(batch_size);
@@ -413,8 +406,8 @@ where
     }
 }
 
-async fn flush_batcher<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn flush_batcher<DT>(
+    config: Arc<Runtime<DT>>,
     ctx: ContextValue<DT>,
     result_tx: mpsc::Sender<WorkerResult>,
     batch_error_tx: mpsc::Sender<OxanaError>,
@@ -423,7 +416,6 @@ async fn flush_batcher<DT, ET>(
     batch_size: usize,
 ) where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     rx.close();
 
@@ -443,15 +435,14 @@ async fn flush_batcher<DT, ET>(
     spawn_batch(config, ctx, result_tx, batch_error_tx, pending);
 }
 
-fn spawn_batch<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+fn spawn_batch<DT>(
+    config: Arc<Runtime<DT>>,
     ctx: ContextValue<DT>,
     result_tx: mpsc::Sender<WorkerResult>,
     batch_error_tx: mpsc::Sender<OxanaError>,
     pending: &mut Vec<PendingJob>,
 ) where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     if pending.is_empty() {
         return;
@@ -466,15 +457,14 @@ fn spawn_batch<DT, ET>(
     });
 }
 
-async fn process_pending_batch<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn process_pending_batch<DT>(
+    config: Arc<Runtime<DT>>,
     ctx: ContextValue<DT>,
     result_tx: mpsc::Sender<WorkerResult>,
     pending: Vec<PendingJob>,
 ) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let mut envelopes = Vec::with_capacity(pending.len());
     let mut permits = Vec::with_capacity(pending.len());
@@ -567,17 +557,15 @@ fn invalid_jobs_by_index(
     invalid_by_index
 }
 
-async fn process_result<ET>(
+async fn process_result(
     result_tx: mpsc::Sender<WorkerResult>,
-    outcome: ExecutionOutcome<ET>,
+    outcome: ExecutionOutcome,
     envelope: JobEnvelope,
-) where
-    ET: std::error::Error + Send + Sync + 'static,
-{
+) {
     let kind = match outcome.result {
         Ok(()) => WorkerResultKind::Success,
         Err(e) => match e {
-            ExecutionError::NotPanic(_) => WorkerResultKind::Failed,
+            ExecutionError::NotPanic => WorkerResultKind::Failed,
             ExecutionError::Panic() => WorkerResultKind::Panicked,
         },
     };
@@ -594,17 +582,15 @@ async fn process_result<ET>(
         .ok();
 }
 
-async fn process_batch_result<ET>(
+async fn process_batch_result(
     result_tx: mpsc::Sender<WorkerResult>,
-    outcome: ExecutionOutcome<ET>,
+    outcome: ExecutionOutcome,
     envelopes: Vec<JobEnvelope>,
-) where
-    ET: std::error::Error + Send + Sync + 'static,
-{
+) {
     let kind = match outcome.result {
         Ok(()) => WorkerResultKind::Success,
         Err(e) => match e {
-            ExecutionError::NotPanic(_) => WorkerResultKind::Failed,
+            ExecutionError::NotPanic => WorkerResultKind::Failed,
             ExecutionError::Panic() => WorkerResultKind::Panicked,
         },
     };
@@ -625,8 +611,8 @@ async fn process_batch_result<ET>(
         .ok();
 }
 
-async fn run_queue_watcher<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn run_queue_watcher<DT>(
+    config: Arc<Runtime<DT>>,
     queue_config: QueueConfig,
     job_tx: mpsc::Sender<WorkerJob>,
     queue_controls: Arc<QueueControlsMap>,
@@ -634,7 +620,6 @@ async fn run_queue_watcher<DT, ET>(
 ) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let mut tracked_queues = HashSet::new();
     let queue_concurrency = queue_config.concurrency;
@@ -647,7 +632,10 @@ where
             QueueKind::Dynamic { prefix, .. } => config
                 .storage
                 .internal
-                .track_redis_result(config.storage.internal.queues(&format!("{prefix}*")).await)?
+                .track_redis_result(
+                    config.storage.internal.queues(&format!("{prefix}*")).await,
+                    config.settings.redis_failure_tolerance,
+                )?
                 .map(|queues| queues.into_iter().collect())
                 .unwrap_or_default(),
         };
@@ -713,8 +701,11 @@ where
 
         if config.cancel_token.is_cancelled() {
             return Ok(());
-        } else if let QueueKind::Dynamic { sleep_period, .. } = &queue_config.kind {
-            tokio::time::sleep(*sleep_period).await;
+        } else if let QueueKind::Dynamic {
+            discovery_interval, ..
+        } = queue_config.kind
+        {
+            tokio::time::sleep(discovery_interval).await;
         } else {
             return Ok(());
         }
@@ -733,15 +724,14 @@ where
     });
 }
 
-async fn runtime_queue_config<DT, ET>(
-    config: &Config<DT, ET>,
+async fn runtime_queue_config<DT>(
+    config: &Runtime<DT>,
     queue_key: &str,
     base_queue_key: &str,
     default_runtime_config: QueueRuntimeConfig,
 ) -> Result<QueueRuntimeConfig, OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     if queue_key == base_queue_key {
         return config
@@ -764,17 +754,16 @@ where
         .await
 }
 
-async fn run_queue_config_watcher<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn run_queue_config_watcher<DT>(
+    config: Arc<Runtime<DT>>,
     queue_key: String,
     base_queue_key: String,
     default_runtime_config: QueueRuntimeConfig,
-    queue_concurrency: crate::QueueConcurrency,
+    queue_concurrency: QueueConcurrency,
     queue_control: Arc<crate::semaphores_map::QueueControl>,
 ) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -793,6 +782,7 @@ where
                         default_runtime_config.clone(),
                     )
                     .await,
+                    config.settings.redis_failure_tolerance,
                 )? {
                     let runtime_config = queue_concurrency.effective_runtime_config(runtime_config);
                     queue_control.apply_config(runtime_config);
@@ -802,12 +792,11 @@ where
     }
 }
 
-async fn wait_for_workers_to_finish<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+async fn wait_for_workers_to_finish<DT>(
+    config: Arc<Runtime<DT>>,
     queue_controls: Arc<QueueControlsMap>,
 ) where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     let t_start = std::time::Instant::now();
     let mut ticks = 0;
@@ -824,7 +813,7 @@ async fn wait_for_workers_to_finish<DT, ET>(
             tracing::info!("Waiting for {} workers to finish...", busy_count);
         }
 
-        if t_start.elapsed() > config.shutdown_timeout {
+        if t_start.elapsed() > config.settings.shutdown_timeout {
             tracing::error!("Shutdown timeout reached");
             break;
         }
@@ -837,10 +826,12 @@ async fn wait_for_workers_to_finish<DT, ET>(
 mod tests {
     use super::{PendingJob, process_pending_batch, spawn_queue_task};
     use crate::QueueRuntimeConfig;
+    use crate::config::{Config, RuntimeSettings};
+    use crate::runtime::Runtime;
     use crate::semaphores_map::QueueControlsMap;
     use crate::test_helper::{random_string, redis_pool};
     use crate::worker_registry::{self, BatchBuild, InvalidBatchJob, WorkerConfigKind};
-    use crate::{Config, ContextValue, Job, JobEnvelope, Storage, Worker, WorkerConfig};
+    use crate::{ContextValue, Job, JobEnvelope, Storage, Worker, WorkerConfig};
     use serde::{Deserialize, Serialize};
     use std::{sync::Arc, time::Duration};
     use testresult::TestResult;
@@ -878,7 +869,7 @@ mod tests {
     fn unsorted_invalid_batch_factory(
         _values: Vec<serde_json::Value>,
         _ctx: &(),
-    ) -> Result<BatchBuild<std::io::Error>, crate::OxanaError> {
+    ) -> Result<BatchBuild, crate::OxanaError> {
         Ok(BatchBuild {
             job: None,
             invalid: vec![
@@ -901,15 +892,10 @@ mod tests {
             .namespace(random_string())
             .build_from_pool(pool)?;
         let queue = random_string();
-        let mut config = Config::new(&storage);
+        let mut config = Config::new();
         config.register_worker_with(WorkerConfig {
             name: UnsortedInvalidJob::worker_name().to_string(),
-            factory: worker_registry::job_factory::<
-                UnsortedInvalidWorker,
-                UnsortedInvalidJob,
-                (),
-                std::io::Error,
-            >,
+            factory: worker_registry::job_factory::<UnsortedInvalidWorker, UnsortedInvalidJob, ()>,
             batch_factory: unsorted_invalid_batch_factory,
             batch_config: Some(crate::WorkerBatchConfig::new(
                 2,
@@ -943,7 +929,17 @@ mod tests {
         }
         let (result_tx, _result_rx) = mpsc::channel(1);
 
-        process_pending_batch(Arc::new(config), ContextValue::new(()), result_tx, pending).await?;
+        process_pending_batch(
+            Arc::new(Runtime::new(
+                storage.clone(),
+                config,
+                RuntimeSettings::new(),
+            )),
+            ContextValue::new(()),
+            result_tx,
+            pending,
+        )
+        .await?;
 
         assert_eq!(storage.dead_count().await?, 2);
         assert_eq!(storage.jobs_count().await?, 0);

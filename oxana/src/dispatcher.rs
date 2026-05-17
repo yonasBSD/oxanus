@@ -3,16 +3,17 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
+use crate::JobId;
 use crate::error::OxanaError;
 use crate::queue::{QueueConfig, QueueThrottle};
+use crate::runtime::Runtime;
 use crate::semaphores_map::QueueControl;
 use crate::storage_internal::StorageInternal;
 use crate::throttler::Throttler;
 use crate::worker_event::WorkerJob;
-use crate::{Config, JobId};
 
-pub async fn run<DT, ET>(
-    config: Arc<Config<DT, ET>>,
+pub async fn run<DT>(
+    config: Arc<Runtime<DT>>,
     queue_config: QueueConfig,
     queue_key: String,
     job_tx: mpsc::Sender<WorkerJob>,
@@ -20,7 +21,6 @@ pub async fn run<DT, ET>(
 ) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
-    ET: std::error::Error + Send + Sync + 'static,
 {
     loop {
         let permit = tokio::select! {
@@ -32,8 +32,8 @@ where
         };
 
         tokio::select! {
-            result = pop_queue_message(&config.storage.internal, &queue_config, &queue_key) => {
-                match config.storage.internal.track_redis_result(result)? {
+            result = pop_queue_message(&config.storage.internal, &queue_config, &queue_key, config.settings.dequeue_timeout, config.settings.throttled_queue_fallback_wait) => {
+                match config.storage.internal.track_redis_result(result, config.settings.redis_failure_tolerance)? {
                     Some(Some(job_id)) => {
                         let job = WorkerJob { job_id, permit };
                         job_tx
@@ -46,7 +46,7 @@ where
                     }
                     None => {
                         drop(permit);
-                        sleep(Duration::from_secs(1)).await;
+                        sleep(config.settings.dispatcher_idle_sleep).await;
                     }
                 }
             }
@@ -65,21 +65,31 @@ async fn pop_queue_message(
     storage: &StorageInternal,
     queue_config: &QueueConfig,
     queue_key: &str,
+    dequeue_timeout: std::time::Duration,
+    throttled_queue_fallback_wait: std::time::Duration,
 ) -> Result<Option<JobId>, OxanaError> {
     match &queue_config.throttle {
-        Some(throttle) => pop_queue_message_w_throttle(storage, queue_key, throttle).await,
-        None => pop_queue_message_wo_throttle(storage, queue_key, 1.0).await,
+        Some(throttle) => {
+            pop_queue_message_w_throttle(
+                storage,
+                queue_key,
+                throttle,
+                throttled_queue_fallback_wait,
+            )
+            .await
+        }
+        None => pop_queue_message_wo_throttle(storage, queue_key, dequeue_timeout).await,
     }
 }
 
 async fn pop_queue_message_wo_throttle(
     storage: &StorageInternal,
     queue_key: &str,
-    timeout: f64,
+    timeout: Duration,
 ) -> Result<Option<JobId>, OxanaError> {
     let job_id = storage.dequeue(queue_key).await?;
     if job_id.is_none() {
-        sleep(Duration::from_secs_f64(timeout)).await;
+        sleep(timeout).await;
     }
     Ok(job_id)
 }
@@ -88,6 +98,7 @@ async fn pop_queue_message_w_throttle(
     storage: &StorageInternal,
     queue_key: &str,
     throttle: &QueueThrottle,
+    fallback_wait: Duration,
 ) -> Result<Option<JobId>, OxanaError> {
     let pool = storage.pool().await?;
     let throttler = Throttler::new(pool, queue_key, throttle.limit, throttle.window_ms);
@@ -105,10 +116,11 @@ async fn pop_queue_message_w_throttle(
         return Ok(Some(job_id));
     }
 
-    sleep(Duration::from_millis(
-        u64::try_from(state.throttled_for.unwrap_or(100)).unwrap_or(100),
-    ))
-    .await;
+    let wait = state
+        .throttled_for
+        .and_then(|millis| u64::try_from(millis).ok())
+        .map_or(fallback_wait, Duration::from_millis);
+    sleep(wait).await;
     Ok(None)
 }
 
@@ -121,10 +133,12 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::run;
+    use crate::config::{Config, RuntimeSettings};
+    use crate::runtime::Runtime;
     use crate::semaphores_map::QueueControlsMap;
     use crate::test_helper::random_string;
     use crate::worker_event::WorkerJob;
-    use crate::{Config, QueueConfig, QueueRuntimeConfig, Storage, StorageBuilderTimeouts};
+    use crate::{QueueConfig, QueueRuntimeConfig, Storage, StorageBuilderTimeouts};
 
     #[tokio::test]
     async fn idle_dispatcher_does_not_hold_pool_connection() -> TestResult {
@@ -136,7 +150,11 @@ mod tests {
             .max_pool_size(1)
             .timeouts(StorageBuilderTimeouts::new(Duration::from_millis(50)))
             .build_from_redis_url(redis_url)?;
-        let config = Arc::new(Config::<(), std::io::Error>::new(&storage));
+        let runtime = Arc::new(Runtime::new(
+            storage.clone(),
+            Config::<()>::new(),
+            RuntimeSettings::new(),
+        ));
         let (job_tx, _job_rx) = mpsc::channel::<WorkerJob>(1);
         let queue_controls = QueueControlsMap::new();
         let queue_control = queue_controls
@@ -144,7 +162,7 @@ mod tests {
             .await;
 
         let handle = tokio::spawn(run(
-            Arc::clone(&config),
+            Arc::clone(&runtime),
             QueueConfig::as_static(&queue),
             queue.clone(),
             job_tx,
@@ -154,7 +172,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(storage.internal.enqueued_count(&queue).await?, 0);
 
-        config.cancel_token.cancel();
+        runtime.cancel_token.cancel();
         tokio::time::timeout(Duration::from_secs(2), handle).await???;
 
         Ok(())
