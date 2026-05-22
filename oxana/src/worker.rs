@@ -159,6 +159,8 @@ pub trait FromContext<T> {
 pub trait Processable: Send {
     async fn process(self: Box<Self>, contexts: Vec<JobContext>) -> Result<(), WorkerError>;
     fn len(&self) -> usize;
+    fn job_name(&self) -> &'static str;
+    fn worker_name(&self) -> &'static str;
     fn max_retries(&self, index: usize) -> u32;
     fn retry_delay(&self, index: usize, retries: u32) -> u64;
     fn should_resume(&self) -> bool {
@@ -238,6 +240,14 @@ where
         1
     }
 
+    fn job_name(&self) -> &'static str {
+        A::name()
+    }
+
+    fn worker_name(&self) -> &'static str {
+        std::any::type_name::<W>()
+    }
+
     fn max_retries(&self, index: usize) -> u32 {
         assert_eq!(index, 0, "single job index must be zero");
         self.worker.max_retries(&self.job)
@@ -281,6 +291,14 @@ where
         self.jobs.len()
     }
 
+    fn job_name(&self) -> &'static str {
+        A::name()
+    }
+
+    fn worker_name(&self) -> &'static str {
+        std::any::type_name::<W>()
+    }
+
     fn max_retries(&self, index: usize) -> u32 {
         let job = self.jobs.get(index).expect("batch job index out of bounds");
         self.worker.max_retries(job)
@@ -293,6 +311,42 @@ where
 
     fn should_resume(&self) -> bool {
         A::should_resume()
+    }
+}
+
+#[cfg(test)]
+mod processable_tests {
+    use super::*;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct LogJob;
+
+    impl Job for LogJob {}
+
+    struct LogWorker;
+
+    #[async_trait::async_trait]
+    impl Worker<LogJob> for LogWorker {
+        type Error = BoxError;
+
+        async fn process(&self, _job: LogJob, _ctx: &JobContext) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn bound_job_exposes_job_and_worker_names() {
+        let processable = BoundJob {
+            worker: LogWorker,
+            job: LogJob,
+        };
+
+        assert_eq!(processable.job_name(), std::any::type_name::<LogJob>());
+        assert_eq!(
+            processable.worker_name(),
+            std::any::type_name::<LogWorker>()
+        );
     }
 }
 

@@ -24,6 +24,12 @@ pub(crate) struct ExecutionOutcome {
     pub(crate) duration_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ExecutionNames {
+    job: &'static str,
+    worker: &'static str,
+}
+
 pub async fn run<DT>(
     config: Arc<Runtime<DT>>,
     worker: BoxedProcessable,
@@ -37,11 +43,16 @@ where
     }
     config.storage.internal.set_started_at(envelope).await?;
     let policy = execution_policy(&worker, 0, envelope);
+    let names = ExecutionNames {
+        job: worker.job_name(),
+        worker: worker.worker_name(),
+    };
 
     tracing::info!(
         job_id = envelope.id,
         queue = envelope.queue,
-        worker = envelope.job.name,
+        job = names.job,
+        worker = names.worker,
         latency_ms = envelope.meta.latency_millis(),
         "Job started"
     );
@@ -56,14 +67,15 @@ where
     tracing::info!(
         job_id = envelope.id,
         queue = envelope.queue,
-        job = envelope.job.name,
+        job = names.job,
+        worker = names.worker,
         success = !is_err,
         duration = duration_ms,
         retries = envelope.meta.retries,
         "Job finished"
     );
 
-    let result = finish_job_result(config.as_ref(), result, envelope, &policy).await;
+    let result = finish_job_result(config.as_ref(), result, envelope, &policy, names).await;
     Ok(ExecutionOutcome {
         result,
         duration_ms,
@@ -115,12 +127,16 @@ where
         .first()
         .expect("envelopes is not empty because it was checked above");
     let queue = first_envelope.queue.clone();
-    let worker_name = first_envelope.job.name.clone();
+    let names = ExecutionNames {
+        job: worker.job_name(),
+        worker: worker.worker_name(),
+    };
 
     tracing::info!(
         batch_size = envelopes.len(),
         queue = queue,
-        worker = worker_name,
+        job = names.job,
+        worker = names.worker,
         "Job batch started"
     );
     let start = std::time::Instant::now();
@@ -134,13 +150,14 @@ where
     tracing::info!(
         batch_size = envelopes.len(),
         queue = queue,
-        worker = worker_name,
+        job = names.job,
+        worker = names.worker,
         success = !is_err,
         duration = duration_ms,
         "Job batch finished"
     );
 
-    let result = finish_batch_result(config.as_ref(), result, envelopes, &policies).await;
+    let result = finish_batch_result(config.as_ref(), result, envelopes, &policies, names).await;
     Ok(ExecutionOutcome {
         result,
         duration_ms,
@@ -192,6 +209,7 @@ async fn finish_job_result<DT>(
     result: ExecutionResult,
     envelope: &JobEnvelope,
     policy: &JobExecutionPolicy,
+    names: ExecutionNames,
 ) -> Result<(), ExecutionError>
 where
     DT: Send + Sync + Clone + 'static,
@@ -212,7 +230,8 @@ where
             tracing::error!(
                 job_id = envelope.id,
                 queue = envelope.queue,
-                worker = envelope.job.name,
+                job = names.job,
+                worker = names.worker,
                 "Job failed"
             );
 
@@ -250,6 +269,7 @@ async fn finish_batch_result<DT>(
     result: ExecutionResult,
     envelopes: &[JobEnvelope],
     policies: &[JobExecutionPolicy],
+    names: ExecutionNames,
 ) -> Result<(), ExecutionError>
 where
     DT: Send + Sync + Clone + 'static,
@@ -274,7 +294,8 @@ where
                 tracing::error!(
                     batch_size = envelopes.len(),
                     queue = envelope.queue,
-                    worker = envelope.job.name,
+                    job = names.job,
+                    worker = names.worker,
                     "Job batch failed"
                 );
             }
@@ -330,7 +351,8 @@ fn retry_delay<DT>(
 #[cfg_attr(feature = "tracing-instrument", tracing::instrument(skip_all, name = "job", fields(
     job_id = envelope.id,
     queue = envelope.queue,
-    worker = envelope.job.name,
+    job = worker.job_name(),
+    worker = worker.worker_name(),
     args = %envelope.job.args,
     retries = envelope.meta.retries,
     latency_ms = envelope.meta.latency_millis(),

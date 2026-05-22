@@ -1883,7 +1883,7 @@ impl StorageInternal {
                                 tracing::info!(
                                     job_id = job_id,
                                     queue = envelope.queue,
-                                    worker = envelope.job.name,
+                                    job = envelope.job.name,
                                     "Resurrecting job"
                                 );
                                 let _: () = (*redis)
@@ -1893,7 +1893,7 @@ impl StorageInternal {
                                 tracing::info!(
                                     job_id = job_id,
                                     queue = envelope.queue,
-                                    worker = envelope.job.name,
+                                    job = envelope.job.name,
                                     "Skipping resurrection (resurrect=false), deleting job"
                                 );
                                 let _: () = (*redis).hdel(&self.keys.jobs, &envelope.id).await?;
