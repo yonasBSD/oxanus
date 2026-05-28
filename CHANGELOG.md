@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Add a root MIT license file and README license section.
 - Add batch workers with `#[oxana(batch_size = ..., batch_timeout_ms = ...)]`, `process_batch`, `BatchItem`, and `WorkerBatchConfig` for high-throughput workloads that can process jobs together.
 - Add on-demand jobs: annotate a job with `#[oxana(on_demand)]` to expose it in the web dashboard with editable JSON arguments and type-aware argument templates.
 - Add worker execution metrics, including per-minute success, failure, panic, execution-time, and histogram data through `Storage::job_metrics`, `Storage::job_metrics_for`, and the new `/metrics` dashboard pages.

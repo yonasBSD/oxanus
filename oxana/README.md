@@ -246,3 +246,7 @@ let output = metrics.encode_to_string()?;
 **rusty-sidekiq** is wire-compatible with Ruby Sidekiq, making it ideal for teams migrating from or coexisting with Ruby services. It can share queues with Ruby Sidekiq workers and use the existing Sidekiq web UI.
 
 **Fang** is SQL-database-backed (no Redis dependency) with both async and threaded execution modes. A good fit for projects that prefer Postgres/SQLite over Redis.
+
+## License
+
+Oxana is licensed under the MIT License.
