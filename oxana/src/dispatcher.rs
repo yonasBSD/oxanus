@@ -77,7 +77,11 @@ async fn pop_queue_message_wo_throttle(
     queue_key: &str,
     timeout: f64,
 ) -> Result<Option<JobId>, OxanaError> {
-    storage.blocking_dequeue(queue_key, timeout).await
+    let job_id = storage.dequeue(queue_key).await?;
+    if job_id.is_none() {
+        sleep(Duration::from_secs_f64(timeout)).await;
+    }
+    Ok(job_id)
 }
 
 async fn pop_queue_message_w_throttle(
@@ -106,4 +110,53 @@ async fn pop_queue_message_w_throttle(
     ))
     .await;
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use testresult::TestResult;
+    use tokio::sync::mpsc;
+
+    use super::run;
+    use crate::semaphores_map::QueueControlsMap;
+    use crate::test_helper::random_string;
+    use crate::worker_event::WorkerJob;
+    use crate::{Config, QueueConfig, QueueRuntimeConfig, Storage, StorageBuilderTimeouts};
+
+    #[tokio::test]
+    async fn idle_dispatcher_does_not_hold_pool_connection() -> TestResult {
+        dotenvy::from_filename(".env.test").ok();
+        let redis_url = std::env::var("REDIS_URL")?;
+        let queue = random_string();
+        let storage = Storage::builder()
+            .namespace(random_string())
+            .max_pool_size(1)
+            .timeouts(StorageBuilderTimeouts::new(Duration::from_millis(50)))
+            .build_from_redis_url(redis_url)?;
+        let config = Arc::new(Config::<(), std::io::Error>::new(&storage));
+        let (job_tx, _job_rx) = mpsc::channel::<WorkerJob>(1);
+        let queue_controls = QueueControlsMap::new();
+        let queue_control = queue_controls
+            .get_or_create(queue.clone(), QueueRuntimeConfig::new(1))
+            .await;
+
+        let handle = tokio::spawn(run(
+            Arc::clone(&config),
+            QueueConfig::as_static(&queue),
+            queue.clone(),
+            job_tx,
+            queue_control,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(storage.internal.enqueued_count(&queue).await?, 0);
+
+        config.cancel_token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle).await???;
+
+        Ok(())
+    }
 }

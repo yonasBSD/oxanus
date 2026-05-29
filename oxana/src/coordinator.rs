@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
@@ -33,6 +34,8 @@ where
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>(channel_capacity);
     let (job_tx, mut job_rx) = mpsc::channel::<WorkerJob>(channel_capacity);
     let (batch_error_tx, mut batch_error_rx) = mpsc::channel::<OxanaError>(channel_capacity);
+    let (queue_task_error_tx, mut queue_task_error_rx) =
+        mpsc::channel::<OxanaError>(channel_capacity);
     let queue_controls = Arc::new(QueueControlsMap::new());
     let mut joinset = JoinSet::new();
     let mut batchers: HashMap<BatchKey, mpsc::Sender<PendingJob>> = HashMap::new();
@@ -47,6 +50,7 @@ where
         queue_config.clone(),
         job_tx.clone(),
         Arc::clone(&queue_controls),
+        queue_task_error_tx,
     ));
 
     loop {
@@ -71,6 +75,17 @@ where
             batch_error = batch_error_rx.recv() => {
                 if let Some(error) = batch_error {
                     return Err(error);
+                }
+            }
+            queue_task_error = queue_task_error_rx.recv() => {
+                match queue_task_error {
+                    Some(error) => return Err(error),
+                    None if config.cancel_token.is_cancelled() => break,
+                    None => {
+                        return Err(OxanaError::GenericError(
+                            "Queue task monitor closed unexpectedly".to_string(),
+                        ));
+                    }
                 }
             }
             _ = config.cancel_token.cancelled() => {
@@ -615,6 +630,7 @@ async fn run_queue_watcher<DT, ET>(
     queue_config: QueueConfig,
     job_tx: mpsc::Sender<WorkerJob>,
     queue_controls: Arc<QueueControlsMap>,
+    queue_task_error_tx: mpsc::Sender<OxanaError>,
 ) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
@@ -662,39 +678,35 @@ where
             let watcher_control = Arc::clone(&queue_control);
             let watcher_base_queue_key = base_queue_key.clone();
             let watcher_default_runtime_config = default_runtime_config.clone();
-            tokio::spawn(async move {
-                if let Err(e) = run_queue_config_watcher(
+            spawn_queue_task(
+                "queue config watcher",
+                queue_task_error_tx.clone(),
+                run_queue_config_watcher(
                     watcher_config,
                     watcher_queue,
                     watcher_base_queue_key,
                     watcher_default_runtime_config,
                     queue_concurrency,
                     watcher_control,
-                )
-                .await
-                {
-                    tracing::error!(error = %e, "Queue config watcher exited with error");
-                }
-            });
+                ),
+            );
 
             let dispatcher_config = Arc::clone(&config);
             let dispatcher_queue_config = queue_config.clone();
             let dispatcher_job_tx = job_tx.clone();
             let dispatcher_queue_control = Arc::clone(&queue_control);
             let dispatcher_queue = queue.clone();
-            tokio::spawn(async move {
-                if let Err(e) = dispatcher::run(
+            spawn_queue_task(
+                "dispatcher",
+                queue_task_error_tx.clone(),
+                dispatcher::run(
                     dispatcher_config,
                     dispatcher_queue_config,
                     dispatcher_queue,
                     dispatcher_job_tx,
                     dispatcher_queue_control,
-                )
-                .await
-                {
-                    tracing::error!(error = %e, "Dispatcher exited with error");
-                }
-            });
+                ),
+            );
 
             tracked_queues.insert(queue);
         }
@@ -707,6 +719,18 @@ where
             return Ok(());
         }
     }
+}
+
+fn spawn_queue_task<F>(task: &'static str, error_tx: mpsc::Sender<OxanaError>, future: F)
+where
+    F: Future<Output = Result<(), OxanaError>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(error) = future.await {
+            tracing::error!(task, error = %error, "Queue task exited with error");
+            let _ = error_tx.try_send(error);
+        }
+    });
 }
 
 async fn runtime_queue_config<DT, ET>(
@@ -811,14 +835,14 @@ async fn wait_for_workers_to_finish<DT, ET>(
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingJob, process_pending_batch};
+    use super::{PendingJob, process_pending_batch, spawn_queue_task};
     use crate::QueueRuntimeConfig;
     use crate::semaphores_map::QueueControlsMap;
     use crate::test_helper::{random_string, redis_pool};
     use crate::worker_registry::{self, BatchBuild, InvalidBatchJob, WorkerConfigKind};
     use crate::{Config, ContextValue, Job, JobEnvelope, Storage, Worker, WorkerConfig};
     use serde::{Deserialize, Serialize};
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use testresult::TestResult;
     use tokio::sync::mpsc;
 
@@ -923,6 +947,28 @@ mod tests {
 
         assert_eq!(storage.dead_count().await?, 2);
         assert_eq!(storage.jobs_count().await?, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queue_task_errors_are_forwarded() -> TestResult {
+        let (error_tx, mut error_rx) = mpsc::channel(1);
+
+        spawn_queue_task("test queue task", error_tx, async {
+            Err(crate::OxanaError::GenericError(
+                "dispatcher failed".to_string(),
+            ))
+        });
+
+        let error = tokio::time::timeout(Duration::from_secs(1), error_rx.recv())
+            .await?
+            .expect("queue task error should be forwarded");
+
+        assert!(matches!(
+            error,
+            crate::OxanaError::GenericError(message) if message == "dispatcher failed"
+        ));
 
         Ok(())
     }

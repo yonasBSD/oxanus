@@ -459,24 +459,6 @@ impl StorageInternal {
         Ok(())
     }
 
-    pub async fn blocking_dequeue(
-        &self,
-        queue: &str,
-        timeout: f64,
-    ) -> Result<Option<JobId>, OxanaError> {
-        let mut redis = self.connection().await?;
-        let job_id: Option<String> = redis
-            .blmove(
-                self.namespace_queue(queue),
-                self.current_processing_queue(),
-                redis::Direction::Right,
-                redis::Direction::Left,
-                timeout,
-            )
-            .await?;
-        Ok(job_id)
-    }
-
     pub async fn dequeue(&self, queue: &str) -> Result<Option<JobId>, OxanaError> {
         let mut redis = self.connection().await?;
         let job_id: Option<JobId> = redis
