@@ -32,7 +32,7 @@ where
         };
 
         tokio::select! {
-            result = pop_queue_message(&config.storage.internal, &queue_config, &queue_key, config.settings.dispatcher_idle_sleep, config.settings.throttled_queue_fallback_wait) => {
+            result = pop_queue_message(&config.storage.internal, &queue_config, &queue_key, config.settings.dequeue_timeout, config.settings.throttled_queue_fallback_wait) => {
                 match config.storage.internal.track_redis_result(result, config.settings.redis_failure_tolerance)? {
                     Some(Some(job_id)) => {
                         let job = WorkerJob { job_id, permit };
@@ -65,7 +65,7 @@ async fn pop_queue_message(
     storage: &StorageInternal,
     queue_config: &QueueConfig,
     queue_key: &str,
-    idle_sleep: std::time::Duration,
+    dequeue_timeout: std::time::Duration,
     throttled_queue_fallback_wait: std::time::Duration,
 ) -> Result<Option<JobId>, OxanaError> {
     match &queue_config.throttle {
@@ -78,7 +78,7 @@ async fn pop_queue_message(
             )
             .await
         }
-        None => pop_queue_message_wo_throttle(storage, queue_key, idle_sleep).await,
+        None => pop_queue_message_wo_throttle(storage, queue_key, dequeue_timeout).await,
     }
 }
 

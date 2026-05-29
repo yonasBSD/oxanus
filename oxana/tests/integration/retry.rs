@@ -1,5 +1,6 @@
 use deadpool_redis::redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use testresult::TestResult;
 
 use crate::shared::*;
@@ -69,6 +70,7 @@ pub async fn test_retry() -> TestResult {
         .runtime(ctx)
         .queue::<QueueOne>()
         .worker::<WorkerRedisSetWithRetry, WorkerRedisSetWithRetryJob>()
+        .dequeue_timeout(Duration::from_millis(50))
         .exit_when_processed(2);
 
     let random_key = uuid::Uuid::new_v4().to_string();
