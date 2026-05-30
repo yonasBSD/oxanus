@@ -110,6 +110,54 @@ impl oxana::Worker<WorkerUniqueReplaceJob> for WorkerUniqueReplace {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkerUniqueReplaceRetryJob {
+    pub id: i32,
+    pub marker: i32,
+}
+
+pub struct WorkerUniqueReplaceRetry;
+
+impl oxana::Job for WorkerUniqueReplaceRetryJob {
+    fn worker_name() -> &'static str {
+        std::any::type_name::<WorkerUniqueReplaceRetry>()
+    }
+
+    fn unique_id(&self) -> Option<String> {
+        Some(format!("unique:{}", self.id))
+    }
+
+    fn on_conflict(&self) -> oxana::JobConflictStrategy {
+        oxana::JobConflictStrategy::Replace
+    }
+}
+
+impl oxana::FromContext<WorkerState> for WorkerUniqueReplaceRetry {
+    fn from_context(_ctx: &WorkerState) -> Self {
+        Self
+    }
+}
+
+#[async_trait::async_trait]
+impl oxana::Worker<WorkerUniqueReplaceRetryJob> for WorkerUniqueReplaceRetry {
+    type Error = WorkerError;
+
+    async fn run_batch(
+        &self,
+        _jobs: Vec<oxana::BatchItem<WorkerUniqueReplaceRetryJob>>,
+    ) -> Result<(), WorkerError> {
+        Err(WorkerError::Generic("retry later".to_string()))
+    }
+
+    fn retry_delay(&self, _job: &WorkerUniqueReplaceRetryJob, _retries: u32) -> u64 {
+        60
+    }
+
+    fn max_retries(&self, _job: &WorkerUniqueReplaceRetryJob) -> u32 {
+        1
+    }
+}
+
 #[tokio::test]
 pub async fn test_unique_skip() -> TestResult {
     let redis_pool = setup();
@@ -180,6 +228,69 @@ pub async fn test_unique_skip() -> TestResult {
     assert_eq!(value, Some(1));
     let value: Option<i32> = redis_conn.get(key2).await?;
     assert_eq!(value, Some(3));
+
+    Ok(())
+}
+
+#[tokio::test]
+pub async fn test_unique_replace_clears_stale_retry_entry() -> TestResult {
+    let redis_pool = setup();
+    let ctx = oxana::ContextValue::new(WorkerState {
+        redis: redis_pool.clone(),
+    });
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool)?;
+    let config = oxana::Config::new(&storage)
+        .register_queue::<QueueOne>()
+        .register_worker::<WorkerUniqueReplaceRetry, WorkerUniqueReplaceRetryJob>()
+        .exit_when_processed(1);
+
+    let job_id = storage
+        .enqueue(QueueOne, WorkerUniqueReplaceRetryJob { id: 1, marker: 1 })
+        .await?;
+
+    oxana::run(config, ctx).await?;
+
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
+    assert_eq!(storage.retries_count().await?, 1);
+
+    let retry_jobs = storage
+        .list_retries(&oxana::QueueListOpts {
+            count: 10,
+            offset: 0,
+        })
+        .await?;
+    let retried = retry_jobs
+        .iter()
+        .find(|job| job.id == job_id)
+        .expect("job should be pending retry");
+    assert_eq!(retried.meta.retries, 1);
+
+    storage
+        .enqueue(QueueOne, WorkerUniqueReplaceRetryJob { id: 1, marker: 2 })
+        .await?;
+
+    assert_eq!(storage.retries_count().await?, 0);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 1);
+
+    let replacement = storage
+        .get_job(&job_id)
+        .await?
+        .expect("replacement should still exist");
+    assert_eq!(replacement.meta.retries, 0);
+    assert_eq!(
+        replacement.job.args.get("marker"),
+        Some(&serde_json::json!(2))
+    );
+
+    let retry_jobs = storage
+        .list_retries(&oxana::QueueListOpts {
+            count: 10,
+            offset: 0,
+        })
+        .await?;
+    assert!(retry_jobs.is_empty());
 
     Ok(())
 }

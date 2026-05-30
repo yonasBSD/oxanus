@@ -46,6 +46,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Avoid persisting runtime queue config when a queue is only using its default configuration.
+- Clear stale retry and schedule membership when replacing a unique job so the old retry attempt cannot run after the replacement resets the retry counter.
 
 ## [1.1.1]
 
