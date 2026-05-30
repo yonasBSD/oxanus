@@ -87,11 +87,17 @@ impl QueueConfig {
 
     pub fn discovery_interval(mut self, interval: Duration) -> Self {
         let interval = require_non_zero_duration("discovery_interval", interval);
-        if let QueueKind::Dynamic {
-            discovery_interval, ..
-        } = &mut self.kind
-        {
-            *discovery_interval = interval;
+        match &mut self.kind {
+            QueueKind::Dynamic {
+                discovery_interval, ..
+            } => {
+                *discovery_interval = interval;
+            }
+            QueueKind::Static { key } => {
+                panic!(
+                    "discovery_interval can only be set on dynamic queues (static queue `{key}`)"
+                );
+            }
         }
         self
     }
@@ -480,5 +486,12 @@ mod tests {
     #[should_panic(expected = "discovery_interval must be greater than zero")]
     fn dynamic_queue_discovery_interval_rejects_zero() {
         let _config = QueueConfig::as_dynamic("tenant").discovery_interval(Duration::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "discovery_interval can only be set on dynamic queues")]
+    fn static_queue_discovery_interval_rejects_configuration() {
+        let _config =
+            QueueConfig::as_static("static_queue").discovery_interval(Duration::from_millis(250));
     }
 }

@@ -117,6 +117,13 @@ pub fn expand_derive_queue(input: DeriveInput) -> TokenStream {
     let struct_ident = &input.ident;
 
     let is_dynamic = args.prefix.is_some();
+    if args.discovery_interval_ms.is_some() && !is_dynamic {
+        abort!(
+            input.ident,
+            "discovery_interval_ms can only be used with dynamic queues (use `prefix = ...`)"
+        );
+    }
+
     let kind = if is_dynamic {
         if num_fields == 0 {
             abort!(input.ident, "Dynamic queues must have struct fields.");
