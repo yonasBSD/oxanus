@@ -50,7 +50,7 @@ pub(crate) struct StorageInternal {
 enum JobEnqueueAction {
     Default,
     Skip,
-    Replace,
+    Replace { existing_queue: String },
 }
 
 #[derive(Default)]
@@ -310,16 +310,10 @@ impl StorageInternal {
 
                 return Ok(envelope.id);
             }
-            JobEnqueueAction::Replace => {
+            JobEnqueueAction::Replace { existing_queue } => {
                 tracing::warn!("Unique job {} already exists, replacing", envelope.id);
 
-                let _: () = deadpool_redis::redis::pipe()
-                    .hset(
-                        &self.keys.jobs,
-                        &envelope.id,
-                        serde_json::to_string(&envelope)?,
-                    )
-                    .query_async(&mut *redis)
+                self.replace_enqueued_w_conn(redis, &existing_queue, &envelope)
                     .await?;
             }
             JobEnqueueAction::Default => {
@@ -352,11 +346,80 @@ impl StorageInternal {
         if exists {
             match envelope.meta.on_conflict {
                 Some(JobConflictStrategy::Skip) | None => Ok(JobEnqueueAction::Skip),
-                Some(JobConflictStrategy::Replace) => Ok(JobEnqueueAction::Replace),
+                Some(JobConflictStrategy::Replace) => {
+                    match self.get_job_w_conn(redis, &envelope.id).await? {
+                        Some(existing) => Ok(JobEnqueueAction::Replace {
+                            existing_queue: existing.queue,
+                        }),
+                        None => Ok(JobEnqueueAction::Default),
+                    }
+                }
             }
         } else {
             Ok(JobEnqueueAction::Default)
         }
+    }
+
+    async fn replace_enqueued_w_conn(
+        &self,
+        redis: &mut deadpool_redis::Connection,
+        existing_queue: &str,
+        envelope: &JobEnvelope,
+    ) -> Result<(), OxanaError> {
+        let old_queue = self.namespace_queue(existing_queue);
+        let new_queue = self.namespace_queue(&envelope.queue);
+
+        let mut pipe = redis::pipe();
+        pipe.hset(
+            &self.keys.jobs,
+            &envelope.id,
+            serde_json::to_string(envelope)?,
+        )
+        .zrem(&self.keys.schedule, &envelope.id)
+        .zrem(&self.keys.retry, &envelope.id)
+        .lrem(old_queue, 0, &envelope.id);
+
+        if existing_queue != envelope.queue.as_str() {
+            pipe.lrem(new_queue.clone(), 0, &envelope.id);
+        }
+
+        pipe.lpush(new_queue, &envelope.id);
+
+        let _: () = pipe.query_async(&mut *redis).await?;
+        Ok(())
+    }
+
+    async fn replace_scheduled_w_conn(
+        &self,
+        redis: &mut deadpool_redis::Connection,
+        existing_queue: &str,
+        envelope: &JobEnvelope,
+    ) -> Result<(), OxanaError> {
+        let old_queue = self.namespace_queue(existing_queue);
+        let new_queue = self.namespace_queue(&envelope.queue);
+
+        let mut pipe = redis::pipe();
+        pipe.hset(
+            &self.keys.jobs,
+            &envelope.id,
+            serde_json::to_string(envelope)?,
+        )
+        .zrem(&self.keys.schedule, &envelope.id)
+        .zrem(&self.keys.retry, &envelope.id)
+        .lrem(old_queue, 0, &envelope.id);
+
+        if existing_queue != envelope.queue.as_str() {
+            pipe.lrem(new_queue, 0, &envelope.id);
+        }
+
+        pipe.zadd(
+            &self.keys.schedule,
+            &envelope.id,
+            envelope.meta.scheduled_at,
+        );
+
+        let _: () = pipe.query_async(&mut *redis).await?;
+        Ok(())
     }
 
     pub async fn enqueue_in(
@@ -385,21 +448,10 @@ impl StorageInternal {
 
                 return Ok(envelope.id);
             }
-            JobEnqueueAction::Replace => {
+            JobEnqueueAction::Replace { existing_queue } => {
                 tracing::warn!("Unique job {} already exists, replacing", envelope.id);
 
-                let _: () = redis::pipe()
-                    .hset(
-                        &self.keys.jobs,
-                        &envelope.id,
-                        serde_json::to_string(&envelope)?,
-                    )
-                    .zadd(
-                        &self.keys.schedule,
-                        &envelope.id,
-                        envelope.meta.scheduled_at,
-                    )
-                    .query_async(&mut redis)
+                self.replace_scheduled_w_conn(&mut redis, &existing_queue, &envelope)
                     .await?;
             }
             JobEnqueueAction::Default => {
