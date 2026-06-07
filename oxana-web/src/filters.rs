@@ -241,11 +241,12 @@ fn should_show_progress(val: &serde_json::Value) -> bool {
 
 fn progress_eta_s(
     val: &serde_json::Value,
-    scheduled_at_micros: i64,
+    started_at_micros: Option<i64>,
     now_micros: i64,
 ) -> Option<f64> {
     let progress = progress_parts(val)?;
-    if progress.total <= 0 || progress.cursor <= 0 || scheduled_at_micros <= 0 {
+    let started_at_micros = started_at_micros?;
+    if progress.total <= 0 || progress.cursor <= 0 || started_at_micros <= 0 {
         return None;
     }
 
@@ -254,7 +255,7 @@ fn progress_eta_s(
         return Some(0.0);
     }
 
-    let elapsed_s = (now_micros - scheduled_at_micros) as f64 / 1_000_000.0;
+    let elapsed_s = (now_micros - started_at_micros) as f64 / 1_000_000.0;
     if elapsed_s <= 0.0 {
         return None;
     }
@@ -329,11 +330,11 @@ pub fn job_progress_note(
 pub fn job_progress_eta(
     val: &serde_json::Value,
     _env: &dyn askama::Values,
-    scheduled_at_micros: &i64,
+    started_at_micros: &Option<i64>,
 ) -> askama::Result<String> {
     Ok(progress_eta_s(
         val,
-        *scheduled_at_micros,
+        *started_at_micros,
         chrono::Utc::now().timestamp_micros(),
     )
     .map(format_duration_from_secs)
@@ -461,13 +462,29 @@ mod tests {
     }
 
     #[test]
-    fn progress_eta_uses_scheduled_time_and_progress_rate() {
+    fn progress_eta_uses_started_time_and_progress_rate() {
         let state = json!({
             "cursor": 25,
             "total": 100
         });
 
-        assert_eq!(progress_eta_s(&state, 1_000_000, 11_000_000), Some(30.0));
+        assert_eq!(
+            progress_eta_s(&state, Some(9_000_000), 19_000_000),
+            Some(30.0)
+        );
+    }
+
+    #[test]
+    fn progress_eta_ignores_time_spent_waiting_in_queue() {
+        let state = json!({
+            "cursor": 25,
+            "total": 100
+        });
+
+        assert_eq!(
+            progress_eta_s(&state, Some(43_201_000_000), 43_211_000_000),
+            Some(30.0)
+        );
     }
 
     #[test]
@@ -478,22 +495,22 @@ mod tests {
                     "cursor": 0,
                     "total": 100
                 }),
-                1_000_000,
+                Some(1_000_000),
                 11_000_000
             ),
             None
         );
-        assert_eq!(progress_eta_s(&json!([25, 100]), 0, 11_000_000), None);
+        assert_eq!(progress_eta_s(&json!([25, 100]), None, 11_000_000), None);
     }
 
     #[test]
     fn progress_eta_is_zero_when_complete() {
         assert_eq!(
-            progress_eta_s(&json!([100, 100]), 1_000_000, 11_000_000),
+            progress_eta_s(&json!([100, 100]), Some(1_000_000), 11_000_000),
             Some(0.0)
         );
         assert_eq!(
-            progress_eta_s(&json!([125, 100]), 1_000_000, 11_000_000),
+            progress_eta_s(&json!([125, 100]), Some(1_000_000), 11_000_000),
             Some(0.0)
         );
     }

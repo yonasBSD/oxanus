@@ -143,13 +143,9 @@ pub(crate) async fn enqueue_cron_job(
     Form(form): Form<CronEnqueueJobForm>,
 ) -> Result<Redirect, OxanaWebError> {
     let envelope = cron_envelope_from_form(&state.catalog, &form)?;
-
     state.storage.enqueue_envelope(envelope).await?;
 
-    Ok(Redirect::to(&format!(
-        "{}/cron?enqueued=1",
-        state.base_path
-    )))
+    Ok(cron_enqueued_redirect(&state.base_path))
 }
 
 pub(crate) async fn on_demand_jobs(
@@ -999,6 +995,10 @@ fn parse_optional_json(
         .transpose()
 }
 
+fn cron_enqueued_redirect(base_path: &str) -> Redirect {
+    Redirect::to(&format!("{base_path}/cron?enqueued=1"))
+}
+
 fn immediate_envelope(
     queue: String,
     name: String,
@@ -1169,9 +1169,10 @@ fn build_on_demand_queue_views(queues: &[oxana::QueueInfo]) -> Vec<OnDemandQueue
 mod tests {
     use super::{
         CronEnqueueJobForm, OnDemandEnqueueJobForm, RawQueue, build_on_demand_queue_views,
-        cron_envelope_from_form, enqueue_on_demand_job, on_demand_envelope_from_form,
-        queue_concurrency_status_from_map, queue_runtime_config_from_map,
-        queue_runtime_config_view_from_map, sort_queues, sorted_worker_metrics,
+        cron_enqueued_redirect, cron_envelope_from_form, enqueue_on_demand_job,
+        on_demand_envelope_from_form, queue_concurrency_status_from_map,
+        queue_runtime_config_from_map, queue_runtime_config_view_from_map, sort_queues,
+        sorted_worker_metrics,
     };
     use crate::OxanaWebState;
     use crate::templates::{QueueConcurrencyStatus, QueueRuntimeConfigView};
@@ -1618,6 +1619,18 @@ mod tests {
         assert!(envelope.meta.on_conflict.is_none());
         assert!(!envelope.meta.resurrect);
         assert_eq!(envelope.meta.scheduled_at, envelope.meta.created_at);
+    }
+
+    #[test]
+    fn cron_enqueue_redirects_to_cron_notice() {
+        let redirect = cron_enqueued_redirect("/admin");
+        let response = redirect.into_response();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/admin/cron?enqueued=1"
+        );
     }
 
     #[test]
