@@ -1099,15 +1099,19 @@ mod job_card_tests {
     use serde_json::json;
 
     fn job_envelope(args: serde_json::Value) -> oxana::JobEnvelope {
+        job_envelope_with_id("job-1", args)
+    }
+
+    fn job_envelope_with_id(id: &str, args: serde_json::Value) -> oxana::JobEnvelope {
         oxana::JobEnvelope {
-            id: "job-1".to_string(),
+            id: id.to_string(),
             queue: "default".to_string(),
             job: oxana::JobData {
                 name: "crate::ImportGame".to_string(),
                 args,
             },
             meta: oxana::JobMeta {
-                id: "job-1".to_string(),
+                id: id.to_string(),
                 retries: 0,
                 unique: false,
                 on_conflict: None,
@@ -1172,6 +1176,23 @@ mod job_card_tests {
                 "<summary class=\"text-xs text-gray-500 cursor-pointer hover:text-gray-300\">Arguments</summary>"
             )
         );
+    }
+
+    #[test]
+    fn global_job_cards_encode_slashes_in_job_links() {
+        let template = GlobalJobsTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/scheduled",
+            kind: JobListKind::Scheduled,
+            jobs: vec![job_envelope_with_id("crate::Worker/type-123", json!({}))],
+            page: 1,
+            total: 1,
+            has_next: false,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("href=\"/admin/jobs/crate%3A%3AWorker%2Ftype-123\""));
     }
 }
 
