@@ -1,7 +1,7 @@
 use axum::{
     Form,
     extract::{Extension, Path, Query},
-    response::Redirect,
+    response::{IntoResponse, Redirect, Response},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -288,35 +288,22 @@ pub(crate) async fn queue_detail(
     Extension(state): Extension<OxanaWebState>,
     Path(queue_key): Path<String>,
     Query(params): Query<PaginationParams>,
-) -> Result<QueueDetailTemplate, OxanaWebError> {
+) -> Result<Response, OxanaWebError> {
+    if is_dynamic_parent_queue(&state.catalog, &queue_key) {
+        return Ok(Redirect::to(&format!("{}/queues", state.base_path)).into_response());
+    }
+
     let page = params.page.max(1);
     let opts = list_opts(page);
 
     let stats = state.storage.stats().await?;
     let queue_config = queue_runtime_config_for(&state, &queue_key).await?;
-    let queue_stats = stats
-        .queues
-        .iter()
-        .find(|q| q.key == queue_key)
-        .cloned()
-        .or_else(|| {
-            // For dynamic sub-queues (prefix#suffix), look inside parent's sub-queues
-            let (prefix, suffix) = queue_key.split_once('#')?;
-            let parent = stats.queues.iter().find(|q| q.key == prefix)?;
-            let dq = parent.queues.iter().find(|dq| dq.suffix == suffix)?;
-            Some(oxana::QueueStats {
-                key: queue_key.clone(),
-                enqueued: dq.enqueued,
-                processed: dq.processed,
-                succeeded: dq.succeeded,
-                panicked: dq.panicked,
-                failed: dq.failed,
-                latency_s: dq.latency_s,
-                rate: dq.rate,
-                queues: Vec::new(),
-            })
-        });
-    let total = queue_stats.as_ref().map_or(0, |q| q.enqueued);
+    let live_enqueued = state
+        .storage
+        .enqueued_count(RawQueue::fixed(queue_key.clone()))
+        .await?;
+    let queue_stats = queue_detail_queue_stats(&stats, &queue_key, live_enqueued);
+    let total = live_enqueued;
     let active_jobs = stats
         .processing
         .iter()
@@ -345,7 +332,61 @@ pub(crate) async fn queue_detail(
         page,
         total,
         has_next,
-    })
+    }
+    .into_response())
+}
+
+fn is_dynamic_parent_queue(catalog: &oxana::Catalog, queue_key: &str) -> bool {
+    !queue_key.contains('#')
+        && catalog
+            .queues
+            .iter()
+            .any(|queue| queue.key == queue_key && queue.dynamic)
+}
+
+fn queue_detail_queue_stats(
+    stats: &oxana::Stats,
+    queue_key: &str,
+    live_enqueued: usize,
+) -> Option<oxana::QueueStats> {
+    if let Some(queue_stats) = stats.queues.iter().find(|q| q.key == queue_key).cloned() {
+        return Some(queue_stats_with_live_enqueued(queue_stats, live_enqueued));
+    }
+
+    let (prefix, suffix) = queue_key.split_once('#')?;
+    let parent = stats.queues.iter().find(|q| q.key == prefix)?;
+    let dynamic_queue = parent.queues.iter().find(|q| q.suffix == suffix)?;
+
+    Some(queue_stats_with_live_enqueued(
+        oxana::QueueStats {
+            key: queue_key.to_string(),
+            enqueued: dynamic_queue.enqueued,
+            processed: dynamic_queue.processed,
+            succeeded: dynamic_queue.succeeded,
+            panicked: dynamic_queue.panicked,
+            failed: dynamic_queue.failed,
+            latency_s: dynamic_queue.latency_s,
+            rate: dynamic_queue.rate,
+            queues: Vec::new(),
+        },
+        live_enqueued,
+    ))
+}
+
+fn queue_stats_with_live_enqueued(
+    mut queue_stats: oxana::QueueStats,
+    live_enqueued: usize,
+) -> oxana::QueueStats {
+    let effective_drain_per_minute = queue_stats.rate.effective_drain_per_minute;
+    queue_stats.rate.eta_s = if live_enqueued == 0 {
+        Some(0.0)
+    } else if effective_drain_per_minute > 0.0 {
+        Some(live_enqueued as f64 / (effective_drain_per_minute / 60.0))
+    } else {
+        None
+    };
+    queue_stats.enqueued = live_enqueued;
+    queue_stats
 }
 
 async fn find_job(
@@ -1170,9 +1211,9 @@ mod tests {
     use super::{
         CronEnqueueJobForm, OnDemandEnqueueJobForm, RawQueue, build_on_demand_queue_views,
         cron_enqueued_redirect, cron_envelope_from_form, enqueue_on_demand_job,
-        on_demand_envelope_from_form, queue_concurrency_status_from_map,
-        queue_runtime_config_from_map, queue_runtime_config_view_from_map, sort_queues,
-        sorted_worker_metrics,
+        is_dynamic_parent_queue, on_demand_envelope_from_form, queue_concurrency_status_from_map,
+        queue_detail_queue_stats, queue_runtime_config_from_map,
+        queue_runtime_config_view_from_map, sort_queues, sorted_worker_metrics,
     };
     use crate::OxanaWebState;
     use crate::templates::{QueueConcurrencyStatus, QueueRuntimeConfigView};
@@ -1279,6 +1320,24 @@ mod tests {
         }
     }
 
+    fn stats_with_queues(queues: Vec<oxana::QueueStats>) -> oxana::Stats {
+        oxana::Stats {
+            global: oxana::StatsGlobal {
+                jobs: 0,
+                enqueued: 0,
+                processed: 0,
+                failed: 0,
+                dead: 0,
+                scheduled: 0,
+                retries: 0,
+                latency_s_max: 0.0,
+            },
+            processes: Vec::new(),
+            processing: Vec::new(),
+            queues,
+        }
+    }
+
     fn queue_info(key: &str, dynamic: bool) -> oxana::QueueInfo {
         oxana::QueueInfo {
             key: key.to_string(),
@@ -1294,6 +1353,66 @@ mod tests {
             config,
             concurrency_status: QueueConcurrencyStatus::Fixed,
         }
+    }
+
+    #[test]
+    fn dynamic_parent_queue_detail_redirect_only_applies_to_parent() {
+        let catalog = oxana::Catalog {
+            workers: Vec::new(),
+            cron_workers: Vec::new(),
+            queues: vec![queue_info("default", false), queue_info("tenant", true)],
+            on_demand_jobs: Vec::new(),
+        };
+
+        assert!(is_dynamic_parent_queue(&catalog, "tenant"));
+        assert!(!is_dynamic_parent_queue(&catalog, "tenant#acme"));
+        assert!(!is_dynamic_parent_queue(&catalog, "default"));
+    }
+
+    #[test]
+    fn queue_detail_queue_stats_uses_live_enqueued_for_static_queue() {
+        let mut queue = queue_with_eta("default", None);
+        queue.enqueued = 42;
+        queue.processed = 7;
+        queue.rate.effective_drain_per_minute = 2.0;
+        queue.rate.eta_s = Some(1_260.0);
+        let stats = stats_with_queues(vec![queue]);
+
+        let detail_stats = queue_detail_queue_stats(&stats, "default", 2)
+            .expect("static queue stats should exist");
+
+        assert_eq!(detail_stats.key, "default");
+        assert_eq!(detail_stats.enqueued, 2);
+        assert_eq!(detail_stats.processed, 7);
+        assert_eq!(detail_stats.rate.eta_s, Some(60.0));
+    }
+
+    #[test]
+    fn queue_detail_queue_stats_uses_live_enqueued_for_dynamic_child_queue() {
+        let mut parent = queue_with_eta("tenant", None);
+        parent.enqueued = 42;
+        parent.queues.push(oxana::DynamicQueueStats {
+            suffix: "acme".to_string(),
+            enqueued: 42,
+            processed: 11,
+            succeeded: 10,
+            panicked: 0,
+            failed: 1,
+            latency_s: 3.5,
+            rate: oxana::QueueRateStats::default(),
+        });
+        let stats = stats_with_queues(vec![parent]);
+
+        let detail_stats = queue_detail_queue_stats(&stats, "tenant#acme", 3)
+            .expect("dynamic child queue stats should exist");
+
+        assert_eq!(detail_stats.key, "tenant#acme");
+        assert_eq!(detail_stats.enqueued, 3);
+        assert_eq!(detail_stats.processed, 11);
+        assert_eq!(detail_stats.succeeded, 10);
+        assert_eq!(detail_stats.failed, 1);
+        assert_eq!(detail_stats.latency_s, 3.5);
+        assert!(detail_stats.queues.is_empty());
     }
 
     #[test]
