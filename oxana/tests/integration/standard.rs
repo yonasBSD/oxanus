@@ -1,8 +1,10 @@
 use crate::shared::*;
 use deadpool_redis::redis::AsyncCommands;
 use oxana::Queue as _;
+use std::sync::Arc;
 use std::time::Duration;
 use testresult::TestResult;
+use tokio::sync::{Notify, oneshot};
 
 #[derive(serde::Serialize)]
 struct DynamicConcurrencyQueue;
@@ -34,6 +36,59 @@ struct DynamicTenantQueue {
 impl oxana::Queue for DynamicTenantQueue {
     fn to_config() -> oxana::QueueConfig {
         oxana::QueueConfig::as_dynamic("tenant").dynamic_concurrency(3)
+    }
+}
+
+#[derive(Clone)]
+struct ShutdownDrainState {
+    started: Arc<Notify>,
+    finished: Arc<Notify>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ShutdownProgressJob;
+
+impl oxana::Job for ShutdownProgressJob {
+    fn worker_name() -> &'static str {
+        std::any::type_name::<ShutdownProgressWorker>()
+    }
+
+    fn should_resurrect() -> bool {
+        false
+    }
+}
+
+struct ShutdownProgressWorker {
+    state: ShutdownDrainState,
+}
+
+impl oxana::FromContext<ShutdownDrainState> for ShutdownProgressWorker {
+    fn from_context(ctx: &ShutdownDrainState) -> Self {
+        Self { state: ctx.clone() }
+    }
+}
+
+#[async_trait::async_trait]
+impl oxana::Worker<ShutdownProgressJob> for ShutdownProgressWorker {
+    type Error = oxana::OxanaError;
+
+    async fn run_batch(
+        &self,
+        jobs: Vec<oxana::BatchItem<ShutdownProgressJob>>,
+    ) -> Result<(), oxana::OxanaError> {
+        let job = jobs
+            .into_iter()
+            .next()
+            .expect("shutdown progress worker receives one job");
+        self.state.started.notify_one();
+        tokio::time::sleep(Duration::from_millis(8500)).await;
+        job.ctx.state.update_progress((1, 1)).await?;
+        self.state.finished.notify_one();
+        Ok(())
+    }
+
+    fn max_retries(&self, _job: &ShutdownProgressJob) -> u32 {
+        0
     }
 }
 
@@ -76,6 +131,56 @@ pub async fn test_standard() -> TestResult {
     assert_eq!(value, Some(random_value));
     assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
     assert_eq!(storage.jobs_count().await?, 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+pub async fn test_shutdown_keeps_heartbeat_until_workers_finish() -> TestResult {
+    let redis_pool = setup();
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool)?;
+    let state = ShutdownDrainState {
+        started: Arc::new(Notify::new()),
+        finished: Arc::new(Notify::new()),
+    };
+    let ctx = oxana::ContextValue::new(state.clone());
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let config = oxana::Config::new(&storage)
+        .register_queue::<QueueOne>()
+        .register_worker::<ShutdownProgressWorker, ShutdownProgressJob>()
+        .with_graceful_shutdown(async move {
+            shutdown_rx
+                .await
+                .map_err(|_| std::io::Error::other("shutdown sender dropped"))
+        });
+    let job_id = storage.enqueue(QueueOne, ShutdownProgressJob).await?;
+    let old_worker = tokio::spawn(async move { oxana::run(config, ctx).await });
+
+    state.started.notified().await;
+    shutdown_tx
+        .send(())
+        .expect("old worker shutdown receiver should be alive");
+
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    let new_ctx = oxana::ContextValue::new(state.clone());
+    let new_config = oxana::Config::new(&storage)
+        .register_queue::<QueueOne>()
+        .register_worker::<ShutdownProgressWorker, ShutdownProgressJob>()
+        .with_graceful_shutdown(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            Ok(())
+        });
+    let new_worker = tokio::spawn(async move { oxana::run(new_config, new_ctx).await });
+
+    tokio::time::timeout(Duration::from_secs(5), new_worker).await???;
+    tokio::time::timeout(Duration::from_secs(5), state.finished.notified()).await?;
+    tokio::time::timeout(Duration::from_secs(5), old_worker).await???;
+
+    assert!(storage.get_job(&job_id).await?.is_none());
+    assert_eq!(storage.dead_count().await?, 0);
 
     Ok(())
 }

@@ -47,6 +47,7 @@ All notable changes to this project will be documented in this file.
 
 - Avoid persisting runtime queue config when a queue is only using its default configuration.
 - Clear stale retry and schedule membership when replacing a unique job so the old retry attempt cannot run after the replacement resets the retry counter.
+- Keep worker heartbeats active while graceful shutdown drains in-flight jobs, preventing another process from treating those jobs as abandoned.
 
 ## [1.1.1]
 

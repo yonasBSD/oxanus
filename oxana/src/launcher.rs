@@ -61,8 +61,9 @@ where
     let mut joinset = JoinSet::new();
     let mut coordinator_joinset = JoinSet::new();
     let stats = Arc::new(Mutex::new(Stats::default()));
+    let ping_cancel_token = CancellationToken::new();
 
-    joinset.spawn(ping_loop(Arc::clone(&config)));
+    joinset.spawn(ping_loop(Arc::clone(&config), ping_cancel_token.clone()));
     joinset.spawn(retry_loop(Arc::clone(&config)));
     joinset.spawn(schedule_loop(Arc::clone(&config)));
     joinset.spawn(resurrect_loop(Arc::clone(&config)));
@@ -109,6 +110,15 @@ where
     tracing::info!("Shutting down");
 
     coordinator_joinset.join_all().await;
+    ping_cancel_token.cancel();
+    while let Some(task_result) = joinset.join_next().await {
+        let task_result = task_result?;
+        if result.is_ok()
+            && let Err(e) = task_result
+        {
+            result = Err(e);
+        }
+    }
 
     config.storage.internal.self_cleanup().await?;
 
@@ -176,16 +186,15 @@ where
     Ok(())
 }
 
-async fn ping_loop<DT, ET>(config: Arc<Config<DT, ET>>) -> Result<(), OxanaError>
+async fn ping_loop<DT, ET>(
+    config: Arc<Config<DT, ET>>,
+    cancel_token: CancellationToken,
+) -> Result<(), OxanaError>
 where
     DT: Send + Sync + Clone + 'static,
     ET: std::error::Error + Send + Sync + 'static,
 {
-    config
-        .storage
-        .internal
-        .ping_loop(config.cancel_token.clone())
-        .await?;
+    config.storage.internal.ping_loop(cancel_token).await?;
 
     tracing::trace!("Ping loop finished");
 
