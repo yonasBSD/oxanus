@@ -56,10 +56,6 @@ struct ShutdownDrainState {
 struct ShutdownProgressJob;
 
 impl oxana::Job for ShutdownProgressJob {
-    fn worker_name() -> &'static str {
-        std::any::type_name::<ShutdownProgressWorker>()
-    }
-
     fn should_resurrect() -> bool {
         false
     }
@@ -153,18 +149,18 @@ pub async fn test_shutdown_keeps_heartbeat_until_workers_finish() -> TestResult 
         started: Arc::new(Notify::new()),
         finished: Arc::new(Notify::new()),
     };
-    let ctx = oxana::ContextValue::new(state.clone());
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<ShutdownProgressWorker, ShutdownProgressJob>()
-        .with_graceful_shutdown(async move {
+    let runtime = storage
+        .runtime(state.clone())
+        .queue::<QueueOne>()
+        .worker::<ShutdownProgressWorker, ShutdownProgressJob>()
+        .shutdown_on(async move {
             shutdown_rx
                 .await
                 .map_err(|_| std::io::Error::other("shutdown sender dropped"))
         });
     let job_id = storage.enqueue(QueueOne, ShutdownProgressJob).await?;
-    let old_worker = tokio::spawn(async move { oxana::run(config, ctx).await });
+    let old_worker = tokio::spawn(async move { runtime.run().await });
 
     state.started.notified().await;
     shutdown_tx
@@ -173,15 +169,15 @@ pub async fn test_shutdown_keeps_heartbeat_until_workers_finish() -> TestResult 
 
     tokio::time::sleep(Duration::from_secs(6)).await;
 
-    let new_ctx = oxana::ContextValue::new(state.clone());
-    let new_config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<ShutdownProgressWorker, ShutdownProgressJob>()
-        .with_graceful_shutdown(async move {
+    let new_runtime = storage
+        .runtime(state.clone())
+        .queue::<QueueOne>()
+        .worker::<ShutdownProgressWorker, ShutdownProgressJob>()
+        .shutdown_on(async move {
             tokio::time::sleep(Duration::from_secs(3)).await;
             Ok(())
         });
-    let new_worker = tokio::spawn(async move { oxana::run(new_config, new_ctx).await });
+    let new_worker = tokio::spawn(async move { new_runtime.run().await });
 
     tokio::time::timeout(Duration::from_secs(5), new_worker).await???;
     tokio::time::timeout(Duration::from_secs(5), state.finished.notified()).await?;

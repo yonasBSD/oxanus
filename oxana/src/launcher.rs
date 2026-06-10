@@ -32,10 +32,7 @@ where
     let stats = Arc::new(Mutex::new(Stats::default()));
     let ping_cancel_token = CancellationToken::new();
 
-    joinset.spawn(ping_loop(
-        Arc::clone(&runtime),
-        ping_cancel_token.clone(),
-    ));
+    joinset.spawn(ping_loop(Arc::clone(&runtime), ping_cancel_token.clone()));
     joinset.spawn(retry_loop(Arc::clone(&runtime)));
     joinset.spawn(schedule_loop(Arc::clone(&runtime)));
     joinset.spawn(resurrect_loop(Arc::clone(&runtime)));
