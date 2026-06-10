@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use crate::{OxanaError, Storage, storage_internal::StorageInternal};
 
+const DEFAULT_REDIS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[must_use]
 pub struct StorageBuilder {
     namespace: Option<String>,
@@ -90,7 +92,7 @@ impl StorageBuilder {
             self.max_pool_size.unwrap_or(50),
             self.timeouts.unwrap_or_default(),
             self.redis_response_timeout
-                .unwrap_or(Duration::from_secs(60)),
+                .unwrap_or(DEFAULT_REDIS_RESPONSE_TIMEOUT),
         )?;
 
         Ok(Storage::new(StorageInternal::new(pool, self.namespace)))
@@ -105,7 +107,7 @@ impl StorageBuilder {
         let timeouts = self.timeouts.unwrap_or_default();
         let redis_response_timeout = self
             .redis_response_timeout
-            .unwrap_or(Duration::from_secs(60));
+            .unwrap_or(DEFAULT_REDIS_RESPONSE_TIMEOUT);
         let pool = Self::build_redis_pool(url, max_pool_size, timeouts, redis_response_timeout)?;
         let stats_pool =
             Self::build_redis_pool(stats_url, max_pool_size, timeouts, redis_response_timeout)?;
@@ -149,19 +151,36 @@ impl StorageBuilder {
     }
 
     pub fn build_from_env_var(self, var_name: &str) -> Result<Storage, OxanaError> {
-        let url = std::env::var(var_name)
-            .map_err(|err| OxanaError::ConfigError(format!("{var_name} is not set: {err}")))?;
+        // Do not interpolate the VarError: its NotUnicode variant embeds the
+        // variable's value, which may contain Redis credentials.
+        let url = std::env::var(var_name).map_err(|err| {
+            let reason = match err {
+                std::env::VarError::NotPresent => "is not set",
+                std::env::VarError::NotUnicode(_) => "is not valid unicode",
+            };
+            OxanaError::ConfigError(format!("{var_name} {reason}"))
+        })?;
         match std::env::var("REDIS_STATS_URL") {
             Ok(stats_url) => self.build_from_redis_urls(url, stats_url),
             Err(_) => self.build_from_redis_url(url),
         }
     }
 
+    /// Builds a storage from a pre-configured pool.
+    ///
+    /// Note that the builder's `max_pool_size`, `timeouts`, and
+    /// `redis_response_timeout` settings do not apply here — the provided pool
+    /// is used as-is.
     pub fn build_from_pool(self, pool: deadpool_redis::Pool) -> Result<Storage, OxanaError> {
         let internal = StorageInternal::new(pool, self.namespace);
         Ok(Storage::new(internal))
     }
 
+    /// Builds a storage from pre-configured pools.
+    ///
+    /// Note that the builder's `max_pool_size`, `timeouts`, and
+    /// `redis_response_timeout` settings do not apply here — the provided pools
+    /// are used as-is.
     pub fn build_from_pools(
         self,
         pool: deadpool_redis::Pool,
@@ -192,5 +211,15 @@ mod tests {
             .expect("storage should build");
 
         assert!(storage.internal.has_dedicated_stats_pool());
+    }
+
+    #[test]
+    fn build_from_env_var_missing_returns_config_error() {
+        let err = StorageBuilder::new()
+            .build_from_env_var("OXANA_TEST_DEFINITELY_UNSET_REDIS_URL")
+            .err()
+            .expect("missing env var should be an error, not a panic");
+
+        assert!(matches!(err, crate::OxanaError::ConfigError(_)));
     }
 }

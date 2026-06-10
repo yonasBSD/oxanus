@@ -11,7 +11,11 @@ All notable changes to this project will be documented in this file.
 - Rename the project and crates from Oxanus to Oxana. Use `oxana`, `oxana-macros`, `oxana-web`, and `#[oxana(...)]` in manifests, imports, derive attributes, examples, and dashboard integrations.
 - Move enqueue-time metadata onto `#[derive(oxana::Job)]`. Job identity, conflict handling, resurrection, throttle cost, and on-demand exposure now belong to the job type; runtime registration maps job types to workers, and custom job hooks now resolve `Self` as the job type.
 - Replace the public `Config` setup path with a typed runtime API: keep `Storage` for enqueueing/monitoring, register workers and queues with `storage.runtime(ctx)`, run with `runtime.run()`, drain with `runtime.drain(queue)`, and inspect registrations with `runtime.catalog()`.
-- Route every worker through the batch-capable execution path. Manual worker implementations now provide `run_batch`, while derive users can keep writing `process` for single-job workers or opt into `process_batch`.
+- Route every worker through the batch-capable execution path. Manual worker implementations now provide `process` or `run_batch` (both have defaults; implementing neither compiles but panics at runtime on the first job), while derive users can keep writing `process` for single-job workers or opt into `process_batch`.
+- Drop the `Serialize` supertrait from `Queue`. Static queues no longer need serializable fields; manual dynamic queue implementations must now implement `key()` themselves (the default panics for dynamic queues).
+- Rename the `QueueKind::Dynamic` field `sleep_period` to `discovery_interval`. Code that pattern-matches or constructs `QueueKind::Dynamic` must be updated.
+- Add `'static` bounds to `Storage::enqueue`/`enqueue_in`/`enqueue_at` job parameters and `Job::name()`.
+- Add a required `legacy_names` field to `WorkerConfig` for manual worker registrations (the derive and `register_worker` fill it with the worker's type name).
 - Own job values during execution instead of borrowing them, so job payload types no longer need to implement `Sync`.
 - Simplify structured job progress to cursor/total values. `JobProgress` no longer exposes a separate `processed` field, and `update_progress` tuple helpers now use `(cursor, total)` or `(cursor, total, note)`.
 
@@ -33,6 +37,7 @@ All notable changes to this project will be documented in this file.
 - Add dashboard controls for pausing queues and changing dynamic queue concurrency from queue detail pages.
 - Add dynamic concurrency examples, including seeded dynamic tenant queues in the web dashboard example.
 - Add runtime tuning setters for worker heartbeats, resurrection/failover thresholds, retry/schedule/cron polling, dequeue/dispatcher backoff, shutdown timeout, and Redis response timeout.
+- Add a configurable dynamic queue discovery interval through `QueueConfig::discovery_interval(...)` and `#[oxana(discovery_interval_ms = ...)]`.
 
 ### Changed
 

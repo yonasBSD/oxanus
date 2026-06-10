@@ -160,14 +160,25 @@ impl<DT> WorkerRegistry<DT> {
 
         match config.kind {
             WorkerConfigKind::Normal => {
-                self.jobs.insert(name.clone(), factories);
+                if self.jobs.insert(name.clone(), factories).is_some() {
+                    tracing::warn!(
+                        job = name,
+                        "Overwriting existing worker registration for job name"
+                    );
+                }
+                self.schedules.remove(&name);
             }
             WorkerConfigKind::Cron {
                 schedule,
                 queue_key,
                 resurrect,
             } => {
-                self.jobs.insert(name.clone(), factories);
+                if self.jobs.insert(name.clone(), factories).is_some() {
+                    tracing::warn!(
+                        job = name,
+                        "Overwriting existing worker registration for job name"
+                    );
+                }
 
                 let schedule = cron::Schedule::from_str(&schedule)
                     .unwrap_or_else(|_| panic!("{}: Invalid cron schedule: {schedule}", name));

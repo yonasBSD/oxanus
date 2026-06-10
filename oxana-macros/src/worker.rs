@@ -104,8 +104,7 @@ pub fn expand_derive_worker(input: DeriveInput) -> TokenStream {
 
     let worker_impl = expand_worker_impl(struct_ident, &type_args, &type_error, &args);
     let from_context_impl = expand_from_context_impl(struct_ident, &type_context, &input);
-    let registry_impl =
-        expand_registry(struct_ident, &type_args, &type_context, &type_error, &args);
+    let registry_impl = expand_registry(struct_ident, &type_args, &type_context, &args);
 
     quote! {
         #worker_impl
@@ -230,7 +229,6 @@ fn expand_registry(
     struct_ident: &Ident,
     type_args: &TokenStream,
     type_context: &TokenStream,
-    _type_error: &TokenStream,
     args: &OxanaArgs,
 ) -> TokenStream {
     let component_registry = match &args.registry {

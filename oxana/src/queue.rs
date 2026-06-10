@@ -64,7 +64,14 @@ impl QueueConfig {
         }
     }
 
+    /// Sets a fixed concurrency limit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the concurrency is zero, since a zero-permit queue would
+    /// silently never process jobs.
     pub fn concurrency(mut self, concurrency: usize) -> Self {
+        assert!(concurrency > 0, "concurrency must be greater than zero");
         self.concurrency = QueueConcurrency::Fixed(concurrency);
         self
     }
@@ -117,7 +124,7 @@ impl QueueConfig {
     }
 }
 
-fn require_non_zero_duration(name: &str, duration: Duration) -> Duration {
+pub(crate) fn require_non_zero_duration(name: &str, duration: Duration) -> Duration {
     assert!(!duration.is_zero(), "{name} must be greater than zero");
     duration
 }

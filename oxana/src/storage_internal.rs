@@ -1766,7 +1766,20 @@ impl StorageInternal {
     ) -> Result<(), OxanaError> {
         tracing::info!("Starting resurrect loop");
 
-        self.ping().await?;
+        // Route the initial ping through the failure tolerance so a transient
+        // Redis error at startup does not abort the whole runtime.
+        loop {
+            if cancel_token.is_cancelled() {
+                return Ok(());
+            }
+            if self
+                .track_redis_result(self.ping().await, failure_tolerance)?
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(scan_interval).await;
+        }
 
         loop {
             tokio::select! {
@@ -1787,11 +1800,14 @@ impl StorageInternal {
         job_name: String,
         cron_job: CronJob,
     ) -> Result<(), OxanaError> {
+        // Clamp instead of panicking: out-of-range offsets overflow both
+        // chrono::Duration and the DateTime addition.
         let initial_offset = chrono::Duration::from_std(settings.cron_initial_offset)
-            .unwrap_or_else(|_| chrono::Duration::seconds(i64::MAX));
-        let iterator = cron_job
-            .schedule
-            .after(&(chrono::Utc::now() + initial_offset));
+            .unwrap_or(chrono::Duration::MAX);
+        let start = chrono::Utc::now()
+            .checked_add_signed(initial_offset)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+        let iterator = cron_job.schedule.after(&start);
 
         let mut previous: Option<chrono::DateTime<chrono::Utc>> = None;
 
@@ -1803,8 +1819,10 @@ impl StorageInternal {
 
                 let now = chrono::Utc::now();
                 let lookahead = chrono::Duration::from_std(settings.cron_lookahead)
-                    .unwrap_or_else(|_| chrono::Duration::seconds(i64::MAX));
-                let max_schedule_time = now + lookahead;
+                    .unwrap_or(chrono::Duration::MAX);
+                let max_schedule_time = now
+                    .checked_add_signed(lookahead)
+                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
 
                 if next > max_schedule_time {
                     tokio::time::sleep(settings.cron_tick_interval).await;

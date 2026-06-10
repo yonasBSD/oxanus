@@ -171,6 +171,12 @@ pub trait Processable: Send {
 pub(crate) type WorkerError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub type BoxedProcessable = Box<dyn Processable>;
 
+/// Type-erased worker error, used as the default [`Worker::Error`] type.
+///
+/// Note that `BoxError` intentionally does not implement [`std::error::Error`]:
+/// doing so would conflict with the blanket `From<E: Error>` impl (via the
+/// reflexive `From<BoxError>`), which is what lets `?` convert any error type
+/// in worker code.
 #[derive(Debug)]
 pub struct BoxError(WorkerError);
 

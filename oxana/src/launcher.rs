@@ -78,7 +78,14 @@ where
 
     tracing::info!("Shutting down");
 
-    coordinator_joinset.join_all().await;
+    while let Some(task_result) = coordinator_joinset.join_next().await {
+        let task_result = task_result?;
+        if result.is_ok()
+            && let Err(e) = task_result
+        {
+            result = Err(e);
+        }
+    }
     ping_cancel_token.cancel();
     while let Some(task_result) = joinset.join_next().await {
         let task_result = task_result?;

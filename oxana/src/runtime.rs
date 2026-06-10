@@ -8,7 +8,7 @@ use crate::config::{Config, RetryDelayOverrideFn, RuntimeSettings};
 use crate::context::ContextValue;
 use crate::drainer::{self, DrainStats};
 use crate::error::OxanaError;
-use crate::queue::{Queue, QueueConcurrency};
+use crate::queue::{Queue, QueueConcurrency, require_non_zero_duration};
 use crate::result_collector::Stats as RunStats;
 use crate::storage::Storage;
 use crate::storage_types::Catalog;
@@ -69,10 +69,16 @@ where
     }
 
     /// Registers a queue by type with a custom fixed concurrency limit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the concurrency is zero, since a zero-permit queue would
+    /// silently never process jobs.
     pub fn queue_with_concurrency<Q>(self, concurrency: usize) -> Self
     where
         Q: Queue,
     {
+        assert!(concurrency > 0, "concurrency must be greater than zero");
         let mut config = Q::to_config();
         config.concurrency = QueueConcurrency::Fixed(concurrency);
         self.queue_with(config)
@@ -101,6 +107,8 @@ where
     }
 
     /// Sets a future that triggers graceful shutdown when it completes.
+    ///
+    /// Defaults to listening for SIGTERM/SIGINT on Unix and Ctrl+C on Windows.
     pub fn shutdown_on(
         mut self,
         fut: impl Future<Output = Result<(), std::io::Error>> + Send + Sync + 'static,
@@ -110,6 +118,10 @@ where
     }
 
     /// Sets Ctrl-C as the shutdown trigger.
+    ///
+    /// Note that this replaces the default signal listener, which also handles
+    /// SIGTERM on Unix. Keep the default if you deploy behind an orchestrator
+    /// that stops processes with SIGTERM.
     pub fn shutdown_on_ctrl_c(self) -> Self {
         self.shutdown_on(tokio::signal::ctrl_c())
     }
@@ -121,9 +133,12 @@ where
     }
 
     /// Sets a global callback to override the retry delay when a job fails.
+    ///
+    /// The `'static` bound on the error trait object is what allows
+    /// `error.downcast_ref::<ConcreteError>()` inside the callback.
     pub fn retry_delay_override(
         mut self,
-        f: impl Fn(&(dyn std::error::Error + Send + Sync), u32, u64) -> Option<u64>
+        f: impl Fn(&(dyn std::error::Error + Send + Sync + 'static), u32, u64) -> Option<u64>
         + Send
         + Sync
         + 'static,
@@ -132,68 +147,134 @@ where
         self
     }
 
+    /// Sets how often this process records a liveness heartbeat. Defaults to 500ms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the interval is zero.
     pub fn heartbeat_interval(mut self, interval: Duration) -> Self {
         self.settings.heartbeat_interval =
             require_non_zero_duration("heartbeat_interval", interval);
         self
     }
 
+    /// Sets how long a process can miss heartbeats before it is considered dead
+    /// and its in-flight jobs become eligible for resurrection. Defaults to 5s.
+    ///
+    /// Must be comfortably larger than [`Self::heartbeat_interval`], otherwise
+    /// live processes are treated as dead and their in-flight jobs are
+    /// re-enqueued while still running.
+    ///
+    /// Note that this also updates the monitoring settings of the underlying
+    /// [`Storage`] handle (and all of its clones), so `Storage::stats()` and
+    /// `Storage::processes()` use the same liveness window.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the threshold is zero.
     pub fn dead_process_threshold(mut self, threshold: Duration) -> Self {
+        let threshold = require_non_zero_duration("dead_process_threshold", threshold);
         self.settings.dead_process_threshold = threshold;
         self.storage.set_dead_process_threshold(threshold);
         self
     }
 
+    /// Sets how often to scan for dead processes and resurrect their jobs.
+    /// Defaults to 2s.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the interval is zero.
     pub fn resurrect_scan_interval(mut self, interval: Duration) -> Self {
         self.settings.resurrect_scan_interval =
             require_non_zero_duration("resurrect_scan_interval", interval);
         self
     }
 
+    /// Sets how many consecutive Redis failures the background loops tolerate
+    /// before shutting the runtime down. Defaults to 30.
     pub fn redis_failure_tolerance(mut self, tolerance: u32) -> Self {
         self.settings.redis_failure_tolerance = tolerance;
         self
     }
 
+    /// Sets how often to poll for due retries. Defaults to 300ms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the interval is zero.
     pub fn retry_poll_interval(mut self, interval: Duration) -> Self {
         self.settings.retry_poll_interval =
             require_non_zero_duration("retry_poll_interval", interval);
         self
     }
 
+    /// Sets how often to poll for due scheduled jobs. Defaults to 300ms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the interval is zero.
     pub fn schedule_poll_interval(mut self, interval: Duration) -> Self {
         self.settings.schedule_poll_interval =
             require_non_zero_duration("schedule_poll_interval", interval);
         self
     }
 
+    /// Sets how long to wait after startup before scheduling cron jobs.
+    /// Defaults to 3s.
     pub fn cron_initial_offset(mut self, offset: Duration) -> Self {
         self.settings.cron_initial_offset = offset;
         self
     }
 
+    /// Sets how far ahead cron occurrences are scheduled. Defaults to 30 minutes.
     pub fn cron_lookahead(mut self, lookahead: Duration) -> Self {
         self.settings.cron_lookahead = lookahead;
         self
     }
 
+    /// Sets how often the cron loop checks for occurrences to schedule.
+    /// Defaults to 1s.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the interval is zero.
     pub fn cron_tick_interval(mut self, interval: Duration) -> Self {
         self.settings.cron_tick_interval =
             require_non_zero_duration("cron_tick_interval", interval);
         self
     }
 
+    /// Sets how long a dispatcher sleeps after polling an empty queue, which
+    /// bounds the pickup latency of jobs enqueued while a queue is idle.
+    /// Defaults to 10s.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the timeout is zero.
     pub fn dequeue_timeout(mut self, timeout: Duration) -> Self {
         self.settings.dequeue_timeout = require_non_zero_duration("dequeue_timeout", timeout);
         self
     }
 
+    /// Sets how long a dispatcher backs off after a tolerated Redis failure
+    /// before polling again. Defaults to 1s.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sleep is zero.
     pub fn dispatcher_idle_sleep(mut self, sleep: Duration) -> Self {
         self.settings.dispatcher_idle_sleep =
             require_non_zero_duration("dispatcher_idle_sleep", sleep);
         self
     }
 
+    /// Sets how long a throttled queue waits before re-checking its throttle
+    /// window when no explicit throttle delay is available. Defaults to 100ms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the wait is zero.
     pub fn throttled_queue_fallback_wait(mut self, wait: Duration) -> Self {
         self.settings.throttled_queue_fallback_wait =
             require_non_zero_duration("throttled_queue_fallback_wait", wait);
@@ -207,6 +288,15 @@ where
 
     /// Runs the Oxana worker system.
     pub async fn run(self) -> Result<RunStats, OxanaError> {
+        if self.settings.dead_process_threshold <= self.settings.heartbeat_interval {
+            tracing::warn!(
+                dead_process_threshold_ms = self.settings.dead_process_threshold.as_millis(),
+                heartbeat_interval_ms = self.settings.heartbeat_interval.as_millis(),
+                "dead_process_threshold should be larger than heartbeat_interval; \
+                 live processes may be treated as dead and their in-flight jobs \
+                 re-enqueued while still running"
+            );
+        }
         crate::launcher::run(self.storage, self.config, self.settings, self.ctx).await
     }
 
@@ -219,11 +309,6 @@ where
     pub(crate) fn settings(&self) -> RuntimeSettings {
         self.settings.clone()
     }
-}
-
-fn require_non_zero_duration(name: &str, duration: Duration) -> Duration {
-    assert!(!duration.is_zero(), "{name} must be greater than zero");
-    duration
 }
 
 pub(crate) struct Runtime<DT> {

@@ -336,7 +336,7 @@ where
 
 fn retry_delay<DT>(
     config: &Runtime<DT>,
-    error: &(dyn std::error::Error + Send + Sync),
+    error: &(dyn std::error::Error + Send + Sync + 'static),
     envelope: &JobEnvelope,
     policy: &JobExecutionPolicy,
 ) -> u64 {

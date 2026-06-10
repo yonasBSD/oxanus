@@ -360,3 +360,59 @@ pub async fn test_dynamic_child_queue_unsets_runtime_concurrency_when_inherited_
 
     Ok(())
 }
+
+fn legacy_worker_named_envelope(queue: &str) -> oxana::JobEnvelope {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp_micros();
+
+    oxana::JobEnvelope {
+        id: id.clone(),
+        queue: queue.to_string(),
+        job: oxana::JobData {
+            // 1.x envelopes carry the worker type name, not the job name.
+            name: std::any::type_name::<WorkerNoop>().to_string(),
+            args: serde_json::json!({}),
+        },
+        meta: oxana::JobMeta {
+            id,
+            retries: 0,
+            unique: false,
+            on_conflict: None,
+            created_at: now,
+            scheduled_at: now,
+            started_at: None,
+            state: None,
+            resurrect: true,
+            error: None,
+            throttle_cost: None,
+        },
+    }
+}
+
+#[tokio::test]
+pub async fn test_legacy_worker_named_envelope_is_processed() -> TestResult {
+    let redis_pool = setup();
+
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(())
+        .queue::<QueueOne>()
+        .worker::<WorkerNoop, WorkerNoopJob>()
+        .dequeue_timeout(Duration::from_millis(50))
+        .exit_when_processed(1);
+
+    storage
+        .enqueue_envelope(legacy_worker_named_envelope("one"))
+        .await?;
+
+    let stats = runtime.run().await?;
+
+    assert_eq!(stats.processed, 1);
+    assert_eq!(stats.succeeded, 1);
+    assert_eq!(storage.dead_count().await?, 0);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
+
+    Ok(())
+}

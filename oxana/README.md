@@ -34,8 +34,10 @@ Oxana focuses on simplicity and depth over breadth - one backend, done well.
 ## Quick Start
 
 ```bash
-cargo add oxana@2.0.0-rc.8
+cargo add oxana@2.0.0-rc.11 --features registry
 ```
+
+The `registry` feature (not enabled by default) powers `#[derive(oxana::Registry)]` and `runtime.register::<...>()` used below; without it, register queues and workers explicitly with `runtime.queue::<...>()` and `runtime.worker::<...>()`.
 
 ```rust
 use oxana::Storage;
@@ -162,6 +164,7 @@ Queue attributes:
 - `#[oxana(concurrency = 2)]` - Set a fixed concurrency limit
 - `#[oxana(concurrency = Dynamic(2))]` - Set a runtime-adjustable concurrency limit with default `2`
 - `#[oxana(throttle(window_ms = 2000, limit = 5))]` - Configure throttling
+- `#[oxana(discovery_interval_ms = 250)]` - Set how often new dynamic queues are discovered (dynamic queues only)
 
 ### Component Registry
 

@@ -112,6 +112,7 @@ Configuration methods that used to live on `Config` now live on the runtime buil
 | `with_graceful_shutdown(tokio::signal::ctrl_c())` | `shutdown_on_ctrl_c()` |
 | `with_retry_delay_override(...)` | `retry_delay_override(...)` |
 | `exit_when_processed(n)` | `exit_when_processed(n)` |
+| `has_registered_queue` / `has_registered_worker` / `has_registered_worker_type` / `has_registered_cron_worker` / `has_registered_cron_worker_type` | inspect `runtime.catalog()` (`queues`, `workers`, `cron_workers`) |
 
 2.x also exposes runtime tuning on the same builder:
 
@@ -166,6 +167,7 @@ Workers still choose their own error type. The derive default is `oxana::BoxErro
 
 ```rust
 #[derive(oxana::Worker)]
+#[oxana(context = AppContext)]
 struct SendEmailWorker;
 
 impl SendEmailWorker {
@@ -286,6 +288,7 @@ For derived batch workers, implement `process_batch`:
 
 ```rust
 #[derive(oxana::Worker)]
+#[oxana(context = AppContext)]
 #[oxana(batch_size = 100, batch_timeout_ms = 500)]
 struct ImportUsersWorker;
 

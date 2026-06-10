@@ -347,3 +347,81 @@ pub async fn test_retry_resets_progress_when_resume_is_false() -> TestResult {
     )
     .await
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkerAlwaysFailJob {}
+
+pub struct WorkerAlwaysFail;
+
+impl oxana::Job for WorkerAlwaysFailJob {}
+
+impl oxana::FromContext<WorkerState> for WorkerAlwaysFail {
+    fn from_context(_ctx: &WorkerState) -> Self {
+        Self
+    }
+}
+
+#[async_trait::async_trait]
+impl oxana::Worker<WorkerAlwaysFailJob> for WorkerAlwaysFail {
+    type Error = oxana::BoxError;
+
+    async fn run_batch(
+        &self,
+        _jobs: Vec<oxana::BatchItem<WorkerAlwaysFailJob>>,
+    ) -> Result<(), Self::Error> {
+        // Goes through `From<E: Error> for BoxError`, mirroring `?` in
+        // derive-based workers with the default error type.
+        Err(WorkerError::Generic("always fails".to_string()).into())
+    }
+
+    fn retry_delay(&self, _job: &WorkerAlwaysFailJob, _retries: u32) -> u64 {
+        0
+    }
+
+    fn max_retries(&self, _job: &WorkerAlwaysFailJob) -> u32 {
+        1
+    }
+}
+
+#[tokio::test]
+pub async fn test_retry_delay_override_receives_downcastable_error() -> TestResult {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SAW_TYPED_ERROR: AtomicBool = AtomicBool::new(false);
+
+    let redis_pool = setup();
+    let ctx = WorkerState {
+        redis: redis_pool.clone(),
+    };
+
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerAlwaysFail, WorkerAlwaysFailJob>()
+        .retry_delay_override(|error, _retries, _default_delay| {
+            // The override must see the concrete error type after the
+            // BoxError unwrap, not a doubly-boxed opaque error.
+            SAW_TYPED_ERROR.store(
+                error.downcast_ref::<WorkerError>().is_some(),
+                Ordering::SeqCst,
+            );
+            Some(0)
+        })
+        .dequeue_timeout(Duration::from_millis(50))
+        .exit_when_processed(2);
+
+    storage.enqueue(QueueOne, WorkerAlwaysFailJob {}).await?;
+
+    runtime.run().await?;
+
+    assert!(
+        SAW_TYPED_ERROR.load(std::sync::atomic::Ordering::SeqCst),
+        "retry delay override should receive a downcastable concrete error"
+    );
+    assert_eq!(storage.dead_count().await?, 1);
+
+    Ok(())
+}

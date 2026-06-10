@@ -13,7 +13,7 @@ use crate::worker_registry::{self, WorkerConfig, WorkerConfigKind, WorkerRegistr
 pub(crate) const DEFAULT_DEAD_PROCESS_THRESHOLD: Duration = Duration::from_secs(5);
 
 pub(crate) type RetryDelayOverrideFn =
-    dyn Fn(&(dyn std::error::Error + Send + Sync), u32, u64) -> Option<u64> + Send + Sync;
+    dyn Fn(&(dyn std::error::Error + Send + Sync + 'static), u32, u64) -> Option<u64> + Send + Sync;
 
 type ShutdownSignal =
     Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send + Sync + 'static>>;
@@ -92,7 +92,7 @@ pub(crate) struct Config<DT> {
 }
 
 impl<DT> Config<DT> {
-    /// Creates a new configuration with default settings.
+    /// Creates an empty registration container for workers and queues.
     pub fn new() -> Self {
         Self {
             registry: WorkerRegistry::new(),
@@ -101,8 +101,22 @@ impl<DT> Config<DT> {
     }
 
     /// Registers a queue from a [`QueueConfig`].
+    ///
+    /// Registering the same queue key again replaces the previous
+    /// configuration (last write wins).
     pub fn register_queue_with(&mut self, config: QueueConfig) {
-        self.queues.insert(config);
+        if self.queues.replace(config).is_some() {
+            tracing::debug!("Replacing existing queue registration");
+        }
+    }
+
+    /// Registers a queue only if its key is not registered yet, keeping any
+    /// explicit configuration. Used for implicit registrations (e.g. cron
+    /// queues) so they never override user-provided queue configs.
+    fn register_default_queue(&mut self, config: QueueConfig) {
+        if !self.queues.contains(&config) {
+            self.queues.insert(config);
+        }
     }
 
     /// Registers a worker and its associated job type.
@@ -132,7 +146,7 @@ impl<DT> Config<DT> {
             );
 
             if let Some(queue_config) = <W as Worker<A>>::cron_queue_config() {
-                self.register_queue_with(queue_config);
+                self.register_default_queue(queue_config);
             }
         }
 
@@ -251,7 +265,9 @@ async fn default_shutdown_signal() -> Result<(), std::io::Error> {
 
 fn no_signal() -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send + Sync + 'static>>
 {
-    Box::pin(async move { Ok(()) })
+    // A consumed shutdown slot must never fire; completing immediately would
+    // trigger an instant graceful shutdown instead.
+    Box::pin(std::future::pending())
 }
 
 #[cfg(test)]
