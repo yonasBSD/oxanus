@@ -34,6 +34,13 @@ struct DynamicTenantQueue {
 }
 
 impl oxana::Queue for DynamicTenantQueue {
+    fn key(&self) -> String {
+        format!(
+            "tenant#{}",
+            oxana::value_to_queue_key(serde_json::to_value(self).unwrap_or_default())
+        )
+    }
+
     fn to_config() -> oxana::QueueConfig {
         oxana::QueueConfig::as_dynamic("tenant").dynamic_concurrency(3)
     }
@@ -49,10 +56,6 @@ struct ShutdownDrainState {
 struct ShutdownProgressJob;
 
 impl oxana::Job for ShutdownProgressJob {
-    fn worker_name() -> &'static str {
-        std::any::type_name::<ShutdownProgressWorker>()
-    }
-
     fn should_resurrect() -> bool {
         false
     }
@@ -97,16 +100,17 @@ pub async fn test_standard() -> TestResult {
     let redis_pool = setup();
     let mut redis_conn = redis_pool.get().await?;
 
-    let ctx = oxana::ContextValue::new(WorkerState {
+    let ctx = WorkerState {
         redis: redis_pool.clone(),
-    });
+    };
 
     let storage = oxana::Storage::builder()
         .namespace(random_string())
         .build_from_pool(redis_pool.clone())?;
-    let config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<WorkerRedisSet, WorkerRedisSetJob>()
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerRedisSet, WorkerRedisSetJob>()
         .exit_when_processed(1);
 
     let random_key = uuid::Uuid::new_v4().to_string();
@@ -124,7 +128,7 @@ pub async fn test_standard() -> TestResult {
 
     assert_eq!(storage.enqueued_count(QueueOne).await?, 1);
 
-    oxana::run(config, ctx).await?;
+    runtime.run().await?;
 
     let value: Option<String> = redis_conn.get(random_key).await?;
 
@@ -145,18 +149,18 @@ pub async fn test_shutdown_keeps_heartbeat_until_workers_finish() -> TestResult 
         started: Arc::new(Notify::new()),
         finished: Arc::new(Notify::new()),
     };
-    let ctx = oxana::ContextValue::new(state.clone());
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<ShutdownProgressWorker, ShutdownProgressJob>()
-        .with_graceful_shutdown(async move {
+    let runtime = storage
+        .runtime(state.clone())
+        .queue::<QueueOne>()
+        .worker::<ShutdownProgressWorker, ShutdownProgressJob>()
+        .shutdown_on(async move {
             shutdown_rx
                 .await
                 .map_err(|_| std::io::Error::other("shutdown sender dropped"))
         });
     let job_id = storage.enqueue(QueueOne, ShutdownProgressJob).await?;
-    let old_worker = tokio::spawn(async move { oxana::run(config, ctx).await });
+    let old_worker = tokio::spawn(async move { runtime.run().await });
 
     state.started.notified().await;
     shutdown_tx
@@ -165,15 +169,15 @@ pub async fn test_shutdown_keeps_heartbeat_until_workers_finish() -> TestResult 
 
     tokio::time::sleep(Duration::from_secs(6)).await;
 
-    let new_ctx = oxana::ContextValue::new(state.clone());
-    let new_config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<ShutdownProgressWorker, ShutdownProgressJob>()
-        .with_graceful_shutdown(async move {
+    let new_runtime = storage
+        .runtime(state.clone())
+        .queue::<QueueOne>()
+        .worker::<ShutdownProgressWorker, ShutdownProgressJob>()
+        .shutdown_on(async move {
             tokio::time::sleep(Duration::from_secs(3)).await;
             Ok(())
         });
-    let new_worker = tokio::spawn(async move { oxana::run(new_config, new_ctx).await });
+    let new_worker = tokio::spawn(async move { new_runtime.run().await });
 
     tokio::time::timeout(Duration::from_secs(5), new_worker).await???;
     tokio::time::timeout(Duration::from_secs(5), state.finished.notified()).await?;
@@ -190,21 +194,21 @@ pub async fn test_paused_queue_resumes_after_runtime_config_update() -> TestResu
     let redis_pool = setup();
     let mut redis_conn = redis_pool.get().await?;
 
-    let ctx = oxana::ContextValue::new(WorkerState {
+    let ctx = WorkerState {
         redis: redis_pool.clone(),
-    });
+    };
 
     let storage = oxana::Storage::builder()
         .namespace(random_string())
         .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerRedisSet, WorkerRedisSetJob>()
+        .exit_when_processed(1);
     storage
         .set_queue_state(QueueOne, oxana::QueueState::Paused)
         .await?;
-
-    let config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<WorkerRedisSet, WorkerRedisSetJob>()
-        .exit_when_processed(1);
 
     let random_key = uuid::Uuid::new_v4().to_string();
     let random_value = uuid::Uuid::new_v4().to_string();
@@ -219,7 +223,7 @@ pub async fn test_paused_queue_resumes_after_runtime_config_update() -> TestResu
         )
         .await?;
 
-    let handle = tokio::spawn(async move { oxana::run(config, ctx).await });
+    let handle = tokio::spawn(async move { runtime.run().await });
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let value: Option<String> = redis_conn.get(&random_key).await?;
@@ -353,6 +357,62 @@ pub async fn test_dynamic_child_queue_unsets_runtime_concurrency_when_inherited_
         .get(&child_queue_key)
         .expect("child runtime config should remain after clearing override");
     assert_eq!(config.concurrency, None);
+
+    Ok(())
+}
+
+fn legacy_worker_named_envelope(queue: &str) -> oxana::JobEnvelope {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp_micros();
+
+    oxana::JobEnvelope {
+        id: id.clone(),
+        queue: queue.to_string(),
+        job: oxana::JobData {
+            // 1.x envelopes carry the worker type name, not the job name.
+            name: std::any::type_name::<WorkerNoop>().to_string(),
+            args: serde_json::json!({}),
+        },
+        meta: oxana::JobMeta {
+            id,
+            retries: 0,
+            unique: false,
+            on_conflict: None,
+            created_at: now,
+            scheduled_at: now,
+            started_at: None,
+            state: None,
+            resurrect: true,
+            error: None,
+            throttle_cost: None,
+        },
+    }
+}
+
+#[tokio::test]
+pub async fn test_legacy_worker_named_envelope_is_processed() -> TestResult {
+    let redis_pool = setup();
+
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(())
+        .queue::<QueueOne>()
+        .worker::<WorkerNoop, WorkerNoopJob>()
+        .dequeue_timeout(Duration::from_millis(50))
+        .exit_when_processed(1);
+
+    storage
+        .enqueue_envelope(legacy_worker_named_envelope("one"))
+        .await?;
+
+    let stats = runtime.run().await?;
+
+    assert_eq!(stats.processed, 1);
+    assert_eq!(stats.succeeded, 1);
+    assert_eq!(storage.dead_count().await?, 0);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
 
     Ok(())
 }

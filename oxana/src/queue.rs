@@ -4,17 +4,20 @@ use std::{
     time::Duration,
 };
 
-pub trait Queue: Send + Sync + Serialize {
+pub trait Queue: Send + Sync {
     fn key(&self) -> String {
         match Self::to_config().kind {
             QueueKind::Static { key } => key,
             QueueKind::Dynamic { prefix, .. } => {
-                let value = serde_json::to_value(self).unwrap_or_default();
-                format!("{}#{}", prefix, value_to_queue_key(value))
+                panic!(
+                    "Dynamic queue {prefix} must implement Queue::key() with an instance-specific suffix"
+                )
             }
         }
     }
+
     fn to_config() -> QueueConfig;
+
     fn config(&self) -> QueueConfig {
         Self::to_config()
     }
@@ -46,7 +49,7 @@ impl QueueConfig {
         Self {
             kind: QueueKind::Dynamic {
                 prefix: prefix.into(),
-                sleep_period: Duration::from_millis(500),
+                discovery_interval: Duration::from_millis(500),
             },
             concurrency: QueueConcurrency::Fixed(1),
             throttle: None,
@@ -61,7 +64,14 @@ impl QueueConfig {
         }
     }
 
+    /// Sets a fixed concurrency limit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the concurrency is zero, since a zero-permit queue would
+    /// silently never process jobs.
     pub fn concurrency(mut self, concurrency: usize) -> Self {
+        assert!(concurrency > 0, "concurrency must be greater than zero");
         self.concurrency = QueueConcurrency::Fixed(concurrency);
         self
     }
@@ -82,6 +92,23 @@ impl QueueConfig {
         self
     }
 
+    pub fn discovery_interval(mut self, interval: Duration) -> Self {
+        let interval = require_non_zero_duration("discovery_interval", interval);
+        match &mut self.kind {
+            QueueKind::Dynamic {
+                discovery_interval, ..
+            } => {
+                *discovery_interval = interval;
+            }
+            QueueKind::Static { key } => {
+                panic!(
+                    "discovery_interval can only be set on dynamic queues (static queue `{key}`)"
+                );
+            }
+        }
+        self
+    }
+
     pub fn static_key(&self) -> Option<String> {
         match &self.kind {
             QueueKind::Static { key } => Some(key.clone()),
@@ -95,6 +122,11 @@ impl QueueConfig {
             QueueKind::Dynamic { prefix, .. } => prefix.clone(),
         }
     }
+}
+
+pub(crate) fn require_non_zero_duration(name: &str, duration: Duration) -> Duration {
+    assert!(!duration.is_zero(), "{name} must be greater than zero");
+    duration
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -145,7 +177,7 @@ pub enum QueueKind {
     },
     Dynamic {
         prefix: String,
-        sleep_period: Duration,
+        discovery_interval: Duration,
     },
 }
 
@@ -231,7 +263,8 @@ impl QueueRuntimeConfig {
     }
 }
 
-fn value_to_queue_key(value: serde_json::Value) -> String {
+#[doc(hidden)]
+pub fn value_to_queue_key(value: serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "".to_string(),
         serde_json::Value::String(s) => s,
@@ -271,6 +304,13 @@ mod tests {
     }
 
     impl Queue for TestDynamicQueue {
+        fn key(&self) -> String {
+            format!(
+                "test_dynamic_queue#{}",
+                value_to_queue_key(serde_json::to_value(self).unwrap_or_default())
+            )
+        }
+
         fn to_config() -> QueueConfig {
             QueueConfig::as_dynamic("test_dynamic_queue")
         }
@@ -292,6 +332,22 @@ mod tests {
         );
     }
 
+    #[test]
+    #[should_panic(
+        expected = "Dynamic queue manual_dynamic must implement Queue::key() with an instance-specific suffix"
+    )]
+    fn default_dynamic_queue_key_panics() {
+        struct ManualDynamicQueue;
+
+        impl Queue for ManualDynamicQueue {
+            fn to_config() -> QueueConfig {
+                QueueConfig::as_dynamic("manual_dynamic")
+            }
+        }
+
+        let _key = ManualDynamicQueue.key();
+    }
+
     #[cfg(feature = "macros")]
     #[test]
     fn test_define_queue_with_macro() {
@@ -299,7 +355,7 @@ mod tests {
 
         #[derive(oxana::Registry)]
         #[allow(dead_code)]
-        struct ComponentRegistry(oxana::ComponentRegistry<(), ()>);
+        struct ComponentRegistry(oxana::ComponentRegistry<()>);
 
         #[derive(Serialize, oxana::Queue)]
         struct DefaultQueue;
@@ -383,7 +439,7 @@ mod tests {
         );
 
         #[derive(Serialize, oxana::Queue)]
-        #[oxana(prefix = "dyn_queue", concurrency = 2)]
+        #[oxana(prefix = "dyn_queue", concurrency = 2, discovery_interval_ms = 250)]
         struct DynQueue {
             i: i32,
         }
@@ -393,6 +449,13 @@ mod tests {
             DynQueue::to_config().concurrency,
             QueueConcurrency::Fixed(2)
         );
+        let QueueKind::Dynamic {
+            discovery_interval, ..
+        } = DynQueue::to_config().kind
+        else {
+            panic!("expected dynamic queue");
+        };
+        assert_eq!(discovery_interval, Duration::from_millis(250));
 
         #[derive(Serialize, oxana::Queue)]
         #[oxana(key = "runtime_queue", concurrency = Dynamic(4))]
@@ -424,5 +487,18 @@ mod tests {
                 state: QueueState::Paused,
             }
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "discovery_interval must be greater than zero")]
+    fn dynamic_queue_discovery_interval_rejects_zero() {
+        let _config = QueueConfig::as_dynamic("tenant").discovery_interval(Duration::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "discovery_interval can only be set on dynamic queues")]
+    fn static_queue_discovery_interval_rejects_configuration() {
+        let _config =
+            QueueConfig::as_static("static_queue").discovery_interval(Duration::from_millis(250));
     }
 }

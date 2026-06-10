@@ -5,6 +5,7 @@ use std::{
     num::NonZero,
     sync::Arc,
     sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -33,10 +34,12 @@ use crate::{
 };
 
 const JOB_EXPIRE_TIME: i64 = 7 * 24 * 3600; // 7 days
-const RESURRECT_THRESHOLD_SECS: i64 = 5;
-const MAX_CONSECUTIVE_REDIS_FAILURES: u32 = 30;
 const SCAN_BATCH_SIZE: usize = 500;
 const QUEUE_LENGTH_SNAPSHOT_TTL_SECS: i64 = 120;
+
+fn unix_timestamp_secs_f64() -> f64 {
+    chrono::Utc::now().timestamp_millis() as f64 / 1000.0
+}
 
 #[derive(Clone)]
 pub(crate) struct StorageInternal {
@@ -99,13 +102,13 @@ impl StorageInternal {
         }
     }
 
-    fn record_redis_failure(&self, err: &OxanaError) -> bool {
+    fn record_redis_failure(&self, err: &OxanaError, failure_tolerance: u32) -> bool {
         let count = self
             .consecutive_redis_failures
             .fetch_add(1, Ordering::Relaxed)
             + 1;
         tracing::warn!(error = %err, consecutive_failures = count, "Transient Redis error");
-        count >= MAX_CONSECUTIVE_REDIS_FAILURES
+        count >= failure_tolerance
     }
 
     /// Wraps a Redis operation result with resilience tracking.
@@ -114,6 +117,7 @@ impl StorageInternal {
     pub(crate) fn track_redis_result<T>(
         &self,
         result: Result<T, OxanaError>,
+        failure_tolerance: u32,
     ) -> Result<Option<T>, OxanaError> {
         match result {
             Ok(val) => {
@@ -121,7 +125,7 @@ impl StorageInternal {
                 Ok(Some(val))
             }
             Err(e) => {
-                if self.record_redis_failure(&e) {
+                if self.record_redis_failure(&e, failure_tolerance) {
                     Err(e)
                 } else {
                     Ok(None)
@@ -909,7 +913,7 @@ impl StorageInternal {
         self.build_queue_stats(&mut redis, &queues, false).await
     }
 
-    pub async fn stats(&self) -> Result<Stats, OxanaError> {
+    pub async fn stats(&self, dead_process_threshold: Duration) -> Result<Stats, OxanaError> {
         let mut redis = self.connection().await?;
 
         let queues = self.queues_w_conn(&mut redis, "*").await?;
@@ -934,7 +938,7 @@ impl StorageInternal {
             failed_count_total += value.failed;
         }
 
-        let processes = self.processes().await?;
+        let processes = self.processes(dead_process_threshold).await?;
 
         let mut processing = vec![];
 
@@ -1577,7 +1581,12 @@ impl StorageInternal {
         })
     }
 
-    pub async fn retry_loop(&self, cancel_token: CancellationToken) -> Result<(), OxanaError> {
+    pub async fn retry_loop(
+        &self,
+        cancel_token: CancellationToken,
+        poll_interval: Duration,
+        failure_tolerance: u32,
+    ) -> Result<(), OxanaError> {
         tracing::info!("Starting retry loop");
 
         loop {
@@ -1585,14 +1594,19 @@ impl StorageInternal {
                 _ = cancel_token.cancelled() => {
                     return Ok(());
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(300)) => {
-                    self.track_redis_result(self.enqueue_scheduled(&self.keys.retry).await)?;
+                _ = tokio::time::sleep(poll_interval) => {
+                    self.track_redis_result(self.enqueue_scheduled(&self.keys.retry).await, failure_tolerance)?;
                 }
             }
         }
     }
 
-    pub async fn schedule_loop(&self, cancel_token: CancellationToken) -> Result<(), OxanaError> {
+    pub async fn schedule_loop(
+        &self,
+        cancel_token: CancellationToken,
+        poll_interval: Duration,
+        failure_tolerance: u32,
+    ) -> Result<(), OxanaError> {
         tracing::info!("Starting schedule loop");
 
         loop {
@@ -1600,14 +1614,18 @@ impl StorageInternal {
                 _ = cancel_token.cancelled() => {
                     return Ok(());
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(300)) => {
-                    self.track_redis_result(self.enqueue_scheduled(&self.keys.schedule).await)?;
+                _ = tokio::time::sleep(poll_interval) => {
+                    self.track_redis_result(self.enqueue_scheduled(&self.keys.schedule).await, failure_tolerance)?;
                 }
             }
         }
     }
 
-    pub async fn cleanup_loop(&self, cancel_token: CancellationToken) -> Result<(), OxanaError> {
+    pub async fn cleanup_loop(
+        &self,
+        cancel_token: CancellationToken,
+        failure_tolerance: u32,
+    ) -> Result<(), OxanaError> {
         tracing::info!("Starting cleanup loop");
 
         loop {
@@ -1616,20 +1634,25 @@ impl StorageInternal {
                     return Ok(());
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(600)) => {
-                    self.track_redis_result(self.cleanup().await)?;
+                    self.track_redis_result(self.cleanup().await, failure_tolerance)?;
                 }
             }
         }
     }
 
-    pub async fn ping_loop(&self, cancel_token: CancellationToken) -> Result<(), OxanaError> {
+    pub async fn ping_loop(
+        &self,
+        cancel_token: CancellationToken,
+        heartbeat_interval: Duration,
+        failure_tolerance: u32,
+    ) -> Result<(), OxanaError> {
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     return Ok(());
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(500)) => {
-                    self.track_redis_result(self.ping().await)?;
+                _ = tokio::time::sleep(heartbeat_interval) => {
+                    self.track_redis_result(self.ping().await, failure_tolerance)?;
                 }
             }
         }
@@ -1642,7 +1665,7 @@ impl StorageInternal {
             .zadd(
                 &self.keys.processes,
                 process.id(),
-                chrono::Utc::now().timestamp(),
+                unix_timestamp_secs_f64(),
             )
             .hset(
                 &self.keys.processes_data,
@@ -1710,13 +1733,16 @@ impl StorageInternal {
         }
     }
 
-    pub async fn processes(&self) -> Result<Vec<Process>, OxanaError> {
+    pub async fn processes(
+        &self,
+        dead_process_threshold: Duration,
+    ) -> Result<Vec<Process>, OxanaError> {
         let mut redis = self.connection().await?;
         let process_ids: Vec<String> = (*redis)
             .zrangebyscore(
                 &self.keys.processes,
-                chrono::Utc::now().timestamp() - RESURRECT_THRESHOLD_SECS,
-                chrono::Utc::now().timestamp(),
+                unix_timestamp_secs_f64() - dead_process_threshold.as_secs_f64(),
+                unix_timestamp_secs_f64(),
             )
             .await?;
 
@@ -1731,18 +1757,37 @@ impl StorageInternal {
         Ok(processes)
     }
 
-    pub async fn resurrect_loop(&self, cancel_token: CancellationToken) -> Result<(), OxanaError> {
+    pub async fn resurrect_loop(
+        &self,
+        cancel_token: CancellationToken,
+        scan_interval: Duration,
+        dead_process_threshold: Duration,
+        failure_tolerance: u32,
+    ) -> Result<(), OxanaError> {
         tracing::info!("Starting resurrect loop");
 
-        self.ping().await?;
+        // Route the initial ping through the failure tolerance so a transient
+        // Redis error at startup does not abort the whole runtime.
+        loop {
+            if cancel_token.is_cancelled() {
+                return Ok(());
+            }
+            if self
+                .track_redis_result(self.ping().await, failure_tolerance)?
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(scan_interval).await;
+        }
 
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     return Ok(());
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(2)) => {
-                    self.track_redis_result(self.resurrect().await)?;
+                _ = tokio::time::sleep(scan_interval) => {
+                    self.track_redis_result(self.resurrect(dead_process_threshold).await, failure_tolerance)?;
                 }
             }
         }
@@ -1751,12 +1796,18 @@ impl StorageInternal {
     pub async fn cron_job_loop(
         &self,
         cancel_token: CancellationToken,
+        settings: crate::config::RuntimeSettings,
         job_name: String,
         cron_job: CronJob,
     ) -> Result<(), OxanaError> {
-        let iterator = cron_job
-            .schedule
-            .after(&(chrono::Utc::now() + chrono::Duration::seconds(3)));
+        // Clamp instead of panicking: out-of-range offsets overflow both
+        // chrono::Duration and the DateTime addition.
+        let initial_offset = chrono::Duration::from_std(settings.cron_initial_offset)
+            .unwrap_or(chrono::Duration::MAX);
+        let start = chrono::Utc::now()
+            .checked_add_signed(initial_offset)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+        let iterator = cron_job.schedule.after(&start);
 
         let mut previous: Option<chrono::DateTime<chrono::Utc>> = None;
 
@@ -1767,17 +1818,21 @@ impl StorageInternal {
                 }
 
                 let now = chrono::Utc::now();
-                let max_schedule_time = now + chrono::Duration::minutes(30);
+                let lookahead = chrono::Duration::from_std(settings.cron_lookahead)
+                    .unwrap_or(chrono::Duration::MAX);
+                let max_schedule_time = now
+                    .checked_add_signed(lookahead)
+                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
 
                 if next > max_schedule_time {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(settings.cron_tick_interval).await;
                     continue;
                 }
 
                 if let Some(previous) = previous
                     && previous > now
                 {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(settings.cron_tick_interval).await;
                     continue;
                 }
 
@@ -1800,10 +1855,13 @@ impl StorageInternal {
                     cron_job.resurrect,
                 )?;
 
-                match self.track_redis_result(self.enqueue_at(envelope).await)? {
+                match self.track_redis_result(
+                    self.enqueue_at(envelope).await,
+                    settings.redis_failure_tolerance,
+                )? {
                     Some(_) => break,
                     None => {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(settings.cron_tick_interval).await;
                     }
                 }
             }
@@ -1814,9 +1872,12 @@ impl StorageInternal {
         Ok(())
     }
 
-    pub async fn resurrect(&self) -> Result<(), OxanaError> {
+    pub async fn resurrect(&self, dead_process_threshold: Duration) -> Result<(), OxanaError> {
         let mut redis = self.connection().await?;
-        for process_id in self.dead_process_ids(&mut redis).await? {
+        for process_id in self
+            .dead_process_ids(&mut redis, dead_process_threshold)
+            .await?
+        {
             tracing::info!("Dead process detected: {}", process_id);
 
             let processing_queue = self.processing_queue(&process_id);
@@ -1840,7 +1901,7 @@ impl StorageInternal {
                                 tracing::info!(
                                     job_id = job_id,
                                     queue = envelope.queue,
-                                    worker = envelope.job.name,
+                                    job = envelope.job.name,
                                     "Resurrecting job"
                                 );
                                 let _: () = (*redis)
@@ -1850,7 +1911,7 @@ impl StorageInternal {
                                 tracing::info!(
                                     job_id = job_id,
                                     queue = envelope.queue,
-                                    worker = envelope.job.name,
+                                    job = envelope.job.name,
                                     "Skipping resurrection (resurrect=false), deleting job"
                                 );
                                 let _: () = (*redis).hdel(&self.keys.jobs, &envelope.id).await?;
@@ -2076,6 +2137,7 @@ impl StorageInternal {
     async fn dead_process_ids(
         &self,
         redis: &mut deadpool_redis::Connection,
+        dead_process_threshold: Duration,
     ) -> Result<Vec<String>, OxanaError> {
         let process_ids: Vec<(String, f64)> = (*redis)
             .zrange_withscores(&self.keys.processes, 0, -1)
@@ -2085,7 +2147,7 @@ impl StorageInternal {
             process_ids.iter().map(|(id, _)| id.clone()).collect();
         let mut dead_process_ids = Vec::new();
         let mut seen_dead = HashSet::new();
-        let threshold = (chrono::Utc::now().timestamp() - RESURRECT_THRESHOLD_SECS) as f64;
+        let threshold = unix_timestamp_secs_f64() - dead_process_threshold.as_secs_f64();
 
         for (process_id, score) in process_ids {
             if score < threshold && seen_dead.insert(process_id.clone()) {
@@ -2127,17 +2189,75 @@ mod tests {
     #[derive(Serialize)]
     struct TestJob {}
 
-    impl crate::worker::Job for TestJob {
-        fn worker_name() -> &'static str {
-            "TestJob"
-        }
-    }
+    impl crate::worker::Job for TestJob {}
 
     fn assert_close(actual: f64, expected: f64) {
         assert!(
             (actual - expected).abs() < 1e-9,
             "expected {expected}, got {actual}"
         );
+    }
+
+    async fn assert_latency_ms_in_measurement_window(
+        storage: &StorageInternal,
+        queue: &str,
+        scheduled_at_micros: i64,
+    ) -> Result<f64, OxanaError> {
+        let before = chrono::Utc::now().timestamp_micros();
+        let latency_ms = storage.latency_ms(queue).await?;
+        let after = chrono::Utc::now().timestamp_micros();
+
+        let min_ms = (before - scheduled_at_micros) as f64 / 1_000.0;
+        let max_ms = (after - scheduled_at_micros) as f64 / 1_000.0;
+        assert!(
+            (min_ms..=max_ms).contains(&latency_ms),
+            "expected latency_ms {latency_ms} to be between {min_ms} and {max_ms}"
+        );
+
+        Ok(latency_ms)
+    }
+
+    async fn assert_latency_micros_in_measurement_window(
+        storage: &StorageInternal,
+        queue: &str,
+        scheduled_at_micros: i64,
+    ) -> Result<f64, OxanaError> {
+        let before = chrono::Utc::now().timestamp_micros();
+        let latency_micros = storage.latency_micros(queue).await?;
+        let after = chrono::Utc::now().timestamp_micros();
+
+        let min_micros = (before - scheduled_at_micros) as f64;
+        let max_micros = (after - scheduled_at_micros) as f64;
+        assert!(
+            (min_micros..=max_micros).contains(&latency_micros),
+            "expected latency_micros {latency_micros} to be between {min_micros} and {max_micros}"
+        );
+
+        Ok(latency_micros)
+    }
+
+    #[tokio::test]
+    async fn redis_failure_tolerance_controls_escalation() -> TestResult {
+        let storage = StorageInternal::new(redis_pool().await?, Some(random_string()));
+
+        assert!(
+            storage
+                .track_redis_result::<()>(
+                    Err(OxanaError::GenericError("transient".to_string())),
+                    2,
+                )?
+                .is_none()
+        );
+        assert!(
+            storage
+                .track_redis_result::<()>(
+                    Err(OxanaError::GenericError("transient".to_string())),
+                    2,
+                )
+                .is_err()
+        );
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -2172,9 +2292,7 @@ mod tests {
         envelope.meta.scheduled_at = past;
         storage.enqueue(envelope).await?;
 
-        let latency = storage.latency_ms(&queue).await?;
-
-        assert!((latency - actual_latency as f64).abs() < 50.0);
+        assert_latency_ms_in_measurement_window(&storage, &queue, past).await?;
 
         Ok(())
     }
@@ -2194,20 +2312,13 @@ mod tests {
         let now = chrono::Utc::now();
         let actual_latency_ms = 7777;
         let actual_latency_micros = actual_latency_ms * 1_000;
-        let actual_latency_s = actual_latency_ms as f64 / 1_000.0;
         let past = now.timestamp_micros() - actual_latency_micros;
         envelope.meta.created_at = past;
         envelope.meta.scheduled_at = past;
         storage.enqueue(envelope).await?;
 
-        let latency_ms = storage.latency_ms(&queue).await?;
-        assert!((latency_ms - actual_latency_ms as f64).abs() < 50.0);
-
-        let latency_micros = storage.latency_micros(&queue).await?;
-        assert!((latency_micros - actual_latency_micros as f64).abs() < 50_000.0);
-
-        let latency_s = latency_micros / 1_000_000.0;
-        assert!((latency_s - actual_latency_s).abs() < 0.05);
+        assert_latency_ms_in_measurement_window(&storage, &queue, past).await?;
+        assert_latency_micros_in_measurement_window(&storage, &queue, past).await?;
 
         let mut envelope2 = JobEnvelope::new(queue.clone(), TestJob {})?;
         let actual_latency_ms2 = 5000;
@@ -2217,11 +2328,8 @@ mod tests {
         envelope2.meta.scheduled_at = past2;
         storage.enqueue(envelope2).await?;
 
-        let latency_ms = storage.latency_ms(&queue).await?;
-        assert!((latency_ms - actual_latency_ms as f64).abs() < 50.0);
-
-        let latency_micros = storage.latency_micros(&queue).await?;
-        assert!((latency_micros - actual_latency_micros as f64).abs() < 50_000.0);
+        assert_latency_ms_in_measurement_window(&storage, &queue, past).await?;
+        assert_latency_micros_in_measurement_window(&storage, &queue, past).await?;
 
         Ok(())
     }
@@ -2293,11 +2401,11 @@ mod tests {
             .zadd(
                 &storage.keys.processes,
                 storage.current_process().id(),
-                chrono::Utc::now().timestamp() - RESURRECT_THRESHOLD_SECS - 1,
+                unix_timestamp_secs_f64() - 6.0,
             )
             .await?;
 
-        storage.resurrect().await?;
+        storage.resurrect(Duration::from_secs(5)).await?;
 
         assert_eq!(storage.enqueued_count(&queue).await?, 1);
         assert!(storage.currently_processing_job_ids().await?.is_empty());
@@ -2342,11 +2450,11 @@ mod tests {
             .zadd(
                 &storage.keys.processes,
                 storage.current_process().id(),
-                chrono::Utc::now().timestamp() - RESURRECT_THRESHOLD_SECS - 1,
+                unix_timestamp_secs_f64() - 6.0,
             )
             .await?;
 
-        storage.resurrect().await?;
+        storage.resurrect(Duration::from_secs(5)).await?;
 
         assert_eq!(storage.enqueued_count(&queue).await?, 1);
         assert!(storage.currently_processing_job_ids().await?.is_empty());
@@ -2379,7 +2487,7 @@ mod tests {
             vec![job_id.unwrap()]
         );
 
-        storage.resurrect().await?;
+        storage.resurrect(Duration::from_secs(5)).await?;
 
         assert_eq!(storage.enqueued_count(&queue).await?, 1);
         assert!(storage.currently_processing_job_ids().await?.is_empty());
@@ -2533,7 +2641,7 @@ mod tests {
 
         storage.flush_result_stats(&updates).await?;
 
-        let stats = storage.stats().await?;
+        let stats = storage.stats(std::time::Duration::from_secs(5)).await?;
         let static_stats = stats
             .queues
             .iter()
@@ -2648,7 +2756,7 @@ mod tests {
             .enqueue(JobEnvelope::new(dynamic_queue_b.clone(), TestJob {})?)
             .await?;
 
-        let stats = storage.stats().await?;
+        let stats = storage.stats(std::time::Duration::from_secs(5)).await?;
         let static_stats = stats
             .queues
             .iter()
@@ -2727,7 +2835,7 @@ mod tests {
         assert_eq!(static_enqueued, 2);
         assert!(static_refreshed_at >= chrono::Utc::now().timestamp() - 3);
 
-        let stats = storage.stats().await?;
+        let stats = storage.stats(std::time::Duration::from_secs(5)).await?;
         let static_stats = stats
             .queues
             .iter()
@@ -2822,7 +2930,7 @@ mod tests {
             .query_async(&mut redis)
             .await?;
 
-        let stats = storage.stats().await?;
+        let stats = storage.stats(std::time::Duration::from_secs(5)).await?;
         assert_eq!(stats.global.enqueued, 49);
 
         let static_stats = stats
@@ -2880,7 +2988,7 @@ mod tests {
             .query_async(&mut redis)
             .await?;
 
-        let stats = storage.stats().await?;
+        let stats = storage.stats(std::time::Duration::from_secs(5)).await?;
 
         assert_eq!(stats.global.enqueued, 0);
         assert!(
@@ -2924,7 +3032,7 @@ mod tests {
             .query_async(&mut redis)
             .await?;
 
-        let stats = storage.stats().await?;
+        let stats = storage.stats(std::time::Duration::from_secs(5)).await?;
         let queue_stats = stats
             .queues
             .iter()

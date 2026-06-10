@@ -1,0 +1,5 @@
+error: discovery_interval_ms can only be used with dynamic queues (use `prefix = ...`)
+ --> tests/ui/static_queue_discovery_interval.rs:5:8
+  |
+5 | struct StaticQueue;
+  |        ^^^^^^^^^^^

@@ -1243,13 +1243,19 @@ mod tests {
     }
 
     impl oxana::Queue for DynamicQueue {
+        fn key(&self) -> String {
+            format!(
+                "tenant#{}",
+                oxana::value_to_queue_key(serde_json::to_value(self).unwrap_or_default())
+            )
+        }
+
         fn to_config() -> oxana::QueueConfig {
             oxana::QueueConfig::as_dynamic("tenant")
         }
     }
 
     #[derive(Debug, Serialize, Deserialize, oxana::Job)]
-    #[oxana(worker = OnDemandWorker)]
     #[oxana(on_demand)]
     #[oxana(unique_id = "on_demand_{id}")]
     struct OnDemandJob {
@@ -1280,12 +1286,13 @@ mod tests {
     fn on_demand_catalog() -> oxana::Catalog {
         let storage = oxana::Storage::builder()
             .build_from_redis_url("redis://127.0.0.1/0")
-            .expect("test storage pool should build");
+            .expect("test storage should build");
 
-        oxana::Config::<(), WorkerError>::new(&storage)
-            .register_queue::<StaticQueue>()
-            .register_queue::<DynamicQueue>()
-            .register_worker::<OnDemandWorker, OnDemandJob>()
+        storage
+            .runtime(())
+            .queue::<StaticQueue>()
+            .queue::<DynamicQueue>()
+            .worker::<OnDemandWorker, OnDemandJob>()
             .catalog()
     }
 
@@ -1760,7 +1767,7 @@ mod tests {
             &catalog,
             &OnDemandEnqueueJobForm {
                 queue: "tenant#tenant=acme".to_string(),
-                name: std::any::type_name::<OnDemandWorker>().to_string(),
+                name: std::any::type_name::<OnDemandJob>().to_string(),
                 args: serde_json::json!({
                     "id": 1,
                     "payload": "hello",
@@ -1861,7 +1868,7 @@ mod tests {
             Extension(state),
             Form(OnDemandEnqueueJobForm {
                 queue: "default".to_string(),
-                name: std::any::type_name::<OnDemandWorker>().to_string(),
+                name: std::any::type_name::<OnDemandJob>().to_string(),
                 args: "{".to_string(),
             }),
         )
@@ -1884,7 +1891,7 @@ mod tests {
             &catalog,
             &OnDemandEnqueueJobForm {
                 queue: "default".to_string(),
-                name: std::any::type_name::<OnDemandWorker>().to_string(),
+                name: std::any::type_name::<OnDemandJob>().to_string(),
                 args: serde_json::json!({
                     "id": 42,
                     "payload": "hello",
@@ -1897,7 +1904,7 @@ mod tests {
         assert_eq!(envelope.queue, "default");
         assert_eq!(
             envelope.id,
-            format!("{}/on_demand_42", std::any::type_name::<OnDemandWorker>())
+            format!("{}/on_demand_42", std::any::type_name::<OnDemandJob>())
         );
         assert_eq!(
             envelope.job.args,

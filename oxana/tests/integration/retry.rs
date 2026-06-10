@@ -1,5 +1,6 @@
 use deadpool_redis::redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use testresult::TestResult;
 
 use crate::shared::*;
@@ -15,11 +16,7 @@ pub struct WorkerRedisSetWithRetry {
     state: WorkerState,
 }
 
-impl oxana::Job for WorkerRedisSetWithRetryJob {
-    fn worker_name() -> &'static str {
-        std::any::type_name::<WorkerRedisSetWithRetry>()
-    }
-}
+impl oxana::Job for WorkerRedisSetWithRetryJob {}
 
 impl oxana::FromContext<WorkerState> for WorkerRedisSetWithRetry {
     fn from_context(ctx: &WorkerState) -> Self {
@@ -62,16 +59,18 @@ pub async fn test_retry() -> TestResult {
     let redis_pool = setup();
     let mut redis_conn = redis_pool.get().await?;
 
-    let ctx = oxana::ContextValue::new(WorkerState {
+    let ctx = WorkerState {
         redis: redis_pool.clone(),
-    });
+    };
 
     let storage = oxana::Storage::builder()
         .namespace(random_string())
         .build_from_pool(redis_pool.clone())?;
-    let config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<WorkerRedisSetWithRetry, WorkerRedisSetWithRetryJob>()
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerRedisSetWithRetry, WorkerRedisSetWithRetryJob>()
+        .dequeue_timeout(Duration::from_millis(50))
         .exit_when_processed(2);
 
     let random_key = uuid::Uuid::new_v4().to_string();
@@ -91,7 +90,7 @@ pub async fn test_retry() -> TestResult {
 
     assert_eq!(storage.enqueued_count(QueueOne).await?, 1);
 
-    oxana::run(config, ctx).await?;
+    runtime.run().await?;
 
     let value: Option<String> = redis_conn.get(random_key).await?;
 
@@ -114,11 +113,7 @@ pub struct WorkerStateResumeDefault {
     state: WorkerState,
 }
 
-impl oxana::Job for WorkerStateResumeDefaultJob {
-    fn worker_name() -> &'static str {
-        std::any::type_name::<WorkerStateResumeDefault>()
-    }
-}
+impl oxana::Job for WorkerStateResumeDefaultJob {}
 
 impl oxana::FromContext<WorkerState> for WorkerStateResumeDefault {
     fn from_context(ctx: &WorkerState) -> Self {
@@ -168,10 +163,6 @@ pub struct WorkerStateNoResume {
 }
 
 impl oxana::Job for WorkerStateNoResumeJob {
-    fn worker_name() -> &'static str {
-        std::any::type_name::<WorkerStateNoResume>()
-    }
-
     fn should_resume() -> bool {
         false
     }
@@ -273,15 +264,16 @@ where
     let redis_pool = setup();
     let mut redis_conn = redis_pool.get().await?;
 
-    let ctx = oxana::ContextValue::new(WorkerState {
+    let ctx = WorkerState {
         redis: redis_pool.clone(),
-    });
+    };
     let storage = oxana::Storage::builder()
         .namespace(random_string())
         .build_from_pool(redis_pool.clone())?;
-    let config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<W, A>()
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<W, A>()
         .exit_when_processed(2);
 
     let attempts_key = uuid::Uuid::new_v4().to_string();
@@ -291,7 +283,7 @@ where
         .enqueue(QueueOne, build_job(attempts_key, observations_key.clone()))
         .await?;
 
-    oxana::run(config, ctx).await?;
+    runtime.run().await?;
 
     let observations: Vec<String> = redis_conn.lrange(observations_key, 0, -1).await?;
     let expected_observations = expected_observations
@@ -354,4 +346,82 @@ pub async fn test_retry_resets_progress_when_resume_is_false() -> TestResult {
         &["none", "none"],
     )
     .await
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkerAlwaysFailJob {}
+
+pub struct WorkerAlwaysFail;
+
+impl oxana::Job for WorkerAlwaysFailJob {}
+
+impl oxana::FromContext<WorkerState> for WorkerAlwaysFail {
+    fn from_context(_ctx: &WorkerState) -> Self {
+        Self
+    }
+}
+
+#[async_trait::async_trait]
+impl oxana::Worker<WorkerAlwaysFailJob> for WorkerAlwaysFail {
+    type Error = oxana::BoxError;
+
+    async fn run_batch(
+        &self,
+        _jobs: Vec<oxana::BatchItem<WorkerAlwaysFailJob>>,
+    ) -> Result<(), Self::Error> {
+        // Goes through `From<E: Error> for BoxError`, mirroring `?` in
+        // derive-based workers with the default error type.
+        Err(WorkerError::Generic("always fails".to_string()).into())
+    }
+
+    fn retry_delay(&self, _job: &WorkerAlwaysFailJob, _retries: u32) -> u64 {
+        0
+    }
+
+    fn max_retries(&self, _job: &WorkerAlwaysFailJob) -> u32 {
+        1
+    }
+}
+
+#[tokio::test]
+pub async fn test_retry_delay_override_receives_downcastable_error() -> TestResult {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SAW_TYPED_ERROR: AtomicBool = AtomicBool::new(false);
+
+    let redis_pool = setup();
+    let ctx = WorkerState {
+        redis: redis_pool.clone(),
+    };
+
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerAlwaysFail, WorkerAlwaysFailJob>()
+        .retry_delay_override(|error, _retries, _default_delay| {
+            // The override must see the concrete error type after the
+            // BoxError unwrap, not a doubly-boxed opaque error.
+            SAW_TYPED_ERROR.store(
+                error.downcast_ref::<WorkerError>().is_some(),
+                Ordering::SeqCst,
+            );
+            Some(0)
+        })
+        .dequeue_timeout(Duration::from_millis(50))
+        .exit_when_processed(2);
+
+    storage.enqueue(QueueOne, WorkerAlwaysFailJob {}).await?;
+
+    runtime.run().await?;
+
+    assert!(
+        SAW_TYPED_ERROR.load(std::sync::atomic::Ordering::SeqCst),
+        "retry delay override should receive a downcastable concrete error"
+    );
+    assert_eq!(storage.dead_count().await?, 1);
+
+    Ok(())
 }

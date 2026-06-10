@@ -16,9 +16,6 @@ pub struct WorkerUniqueSkip {
 }
 
 impl oxana::Job for WorkerUniqueSkipJob {
-    fn worker_name() -> &'static str {
-        std::any::type_name::<WorkerUniqueSkip>()
-    }
     fn unique_id(&self) -> Option<String> {
         Some(format!("unique:{}", self.id))
     }
@@ -69,9 +66,6 @@ pub struct WorkerUniqueReplace {
 }
 
 impl oxana::Job for WorkerUniqueReplaceJob {
-    fn worker_name() -> &'static str {
-        std::any::type_name::<WorkerUniqueReplace>()
-    }
     fn unique_id(&self) -> Option<String> {
         Some(format!("unique:{}", self.id))
     }
@@ -119,10 +113,6 @@ pub struct WorkerUniqueReplaceRetryJob {
 pub struct WorkerUniqueReplaceRetry;
 
 impl oxana::Job for WorkerUniqueReplaceRetryJob {
-    fn worker_name() -> &'static str {
-        std::any::type_name::<WorkerUniqueReplaceRetry>()
-    }
-
     fn unique_id(&self) -> Option<String> {
         Some(format!("unique:{}", self.id))
     }
@@ -162,15 +152,16 @@ impl oxana::Worker<WorkerUniqueReplaceRetryJob> for WorkerUniqueReplaceRetry {
 pub async fn test_unique_skip() -> TestResult {
     let redis_pool = setup();
     let mut redis_conn = redis_pool.get().await?;
-    let ctx = oxana::ContextValue::new(WorkerState {
+    let ctx = WorkerState {
         redis: redis_pool.clone(),
-    });
+    };
     let storage = oxana::Storage::builder()
         .namespace(random_string())
         .build_from_pool(redis_pool.clone())?;
-    let config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<WorkerUniqueSkip, WorkerUniqueSkipJob>()
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerUniqueSkip, WorkerUniqueSkipJob>()
         .exit_when_processed(2);
     let key1 = random_string();
     let key2 = random_string();
@@ -218,7 +209,7 @@ pub async fn test_unique_skip() -> TestResult {
 
     assert_eq!(storage.enqueued_count(QueueOne).await?, 2);
 
-    oxana::run(config, ctx).await?;
+    runtime.run().await?;
 
     assert_eq!(storage.dead_count().await?, 0);
     assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
@@ -235,22 +226,23 @@ pub async fn test_unique_skip() -> TestResult {
 #[tokio::test]
 pub async fn test_unique_replace_clears_stale_retry_entry() -> TestResult {
     let redis_pool = setup();
-    let ctx = oxana::ContextValue::new(WorkerState {
+    let ctx = WorkerState {
         redis: redis_pool.clone(),
-    });
+    };
     let storage = oxana::Storage::builder()
         .namespace(random_string())
         .build_from_pool(redis_pool)?;
-    let config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<WorkerUniqueReplaceRetry, WorkerUniqueReplaceRetryJob>()
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerUniqueReplaceRetry, WorkerUniqueReplaceRetryJob>()
         .exit_when_processed(1);
 
     let job_id = storage
         .enqueue(QueueOne, WorkerUniqueReplaceRetryJob { id: 1, marker: 1 })
         .await?;
 
-    oxana::run(config, ctx).await?;
+    runtime.run().await?;
 
     assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
     assert_eq!(storage.retries_count().await?, 1);
@@ -299,15 +291,16 @@ pub async fn test_unique_replace_clears_stale_retry_entry() -> TestResult {
 pub async fn test_unique_replace() -> TestResult {
     let redis_pool = setup();
     let mut redis_conn = redis_pool.get().await?;
-    let ctx = oxana::ContextValue::new(WorkerState {
+    let ctx = WorkerState {
         redis: redis_pool.clone(),
-    });
+    };
     let storage = oxana::Storage::builder()
         .namespace(random_string())
         .build_from_pool(redis_pool)?;
-    let config = oxana::Config::new(&storage)
-        .register_queue::<QueueOne>()
-        .register_worker::<WorkerUniqueReplace, WorkerUniqueReplaceJob>()
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerUniqueReplace, WorkerUniqueReplaceJob>()
         .exit_when_processed(2);
 
     let key1 = random_string();
@@ -356,7 +349,7 @@ pub async fn test_unique_replace() -> TestResult {
 
     assert_eq!(storage.enqueued_count(QueueOne).await?, 2);
 
-    oxana::run(config, ctx).await?;
+    runtime.run().await?;
 
     assert_eq!(storage.dead_count().await?, 0);
     assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
