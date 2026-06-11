@@ -61,10 +61,6 @@ where
         Ok(None)
     }
 
-    pub fn current_index(&self) -> Option<usize> {
-        self.current_index
-    }
-
     async fn mark_current_completed(&mut self) -> Result<(), OxanaError> {
         if let Some(index) = self.current_index.take() {
             let cursor = index + 1;
@@ -174,8 +170,7 @@ impl JobState {
                 &self.job_id,
                 serde_json::to_value(state).map_err(OxanaError::JobStateJsonError)?,
             )
-            .await?;
-        Ok(())
+            .await
     }
 
     pub async fn update_progress(

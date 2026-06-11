@@ -460,3 +460,5 @@ let storage = oxana::Storage::from_url("redis://127.0.0.1/0")?;
 - Remove `Serialize` derives from static queues when they are no longer needed.
 - Move drain, catalog, and web dashboard integration to the runtime API.
 - Replace any `JobProgress::processed` usage with cursor/total progress.
+- Replace removed `JobMeta` convenience accessors (`created_at_millis`, `scheduled_at_millis`, `scheduled_at_secs`, `latency_secs`, `started_at_secs`, `started_at_millis`) with the surviving `*_micros`/`latency_millis` methods or your own conversion, and delete any match arms for the removed (never-raised) `OxanaError::JobPanicked` variant.
+- Add a wildcard arm to any exhaustive `match` on `OxanaError` — the enum is now `#[non_exhaustive]`.
