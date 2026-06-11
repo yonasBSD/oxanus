@@ -130,55 +130,61 @@ pub struct JobMetricsTotals {
     pub execution_ms: u64,
 }
 
-impl JobMetricsTotals {
-    #[must_use]
-    pub fn average_execution_ms(&self) -> f64 {
-        if self.successful_executions == 0 {
-            0.0
-        } else {
-            self.execution_ms as f64 / self.successful_executions as f64
-        }
-    }
-
-    #[must_use]
-    pub fn execution_seconds(&self) -> f64 {
-        self.execution_ms as f64 / 1000.0
-    }
-
-    #[must_use]
-    pub fn failed_executions_without_panics(&self) -> u64 {
-        self.failed_executions
-            .saturating_sub(self.panicked_executions)
-    }
-
-    fn add_metric(&mut self, metric: &str, value: u64) {
-        match metric {
-            METRIC_PROCESSED_JOBS => self.processed = self.processed.saturating_add(value),
-            METRIC_FAILED_JOBS => self.failed = self.failed.saturating_add(value),
-            METRIC_PANICKED_JOBS => self.panicked = self.panicked.saturating_add(value),
-            METRIC_SUCCESSFUL_EXECUTIONS => {
-                self.successful_executions = self.successful_executions.saturating_add(value);
+macro_rules! impl_job_metric_aggregation {
+    ($($ty:ty),* $(,)?) => {$(
+        impl $ty {
+            #[must_use]
+            pub fn average_execution_ms(&self) -> f64 {
+                if self.successful_executions == 0 {
+                    0.0
+                } else {
+                    self.execution_ms as f64 / self.successful_executions as f64
+                }
             }
-            METRIC_FAILED_EXECUTIONS => {
-                self.failed_executions = self.failed_executions.saturating_add(value);
-            }
-            METRIC_PANICKED_EXECUTIONS => {
-                self.panicked_executions = self.panicked_executions.saturating_add(value);
-            }
-            METRIC_EXECUTION_MS => self.execution_ms = self.execution_ms.saturating_add(value),
-            _ => {}
-        }
-    }
 
-    fn finalize(&mut self) {
-        self.succeeded = self.processed.saturating_sub(self.failed);
-        if self.successful_executions + self.failed_executions + self.panicked_executions == 0 {
-            self.successful_executions = self.succeeded;
-            self.failed_executions = self.failed;
-            self.panicked_executions = self.panicked;
+            #[must_use]
+            pub fn failed_executions_without_panics(&self) -> u64 {
+                self.failed_executions
+                    .saturating_sub(self.panicked_executions)
+            }
+
+            fn add_metric(&mut self, metric: &str, value: u64) {
+                match metric {
+                    METRIC_PROCESSED_JOBS => self.processed = self.processed.saturating_add(value),
+                    METRIC_FAILED_JOBS => self.failed = self.failed.saturating_add(value),
+                    METRIC_PANICKED_JOBS => self.panicked = self.panicked.saturating_add(value),
+                    METRIC_SUCCESSFUL_EXECUTIONS => {
+                        self.successful_executions =
+                            self.successful_executions.saturating_add(value);
+                    }
+                    METRIC_FAILED_EXECUTIONS => {
+                        self.failed_executions = self.failed_executions.saturating_add(value);
+                    }
+                    METRIC_PANICKED_EXECUTIONS => {
+                        self.panicked_executions = self.panicked_executions.saturating_add(value);
+                    }
+                    METRIC_EXECUTION_MS => {
+                        self.execution_ms = self.execution_ms.saturating_add(value);
+                    }
+                    _ => {}
+                }
+            }
+
+            fn finalize(&mut self) {
+                self.succeeded = self.processed.saturating_sub(self.failed);
+                if self.successful_executions + self.failed_executions + self.panicked_executions
+                    == 0
+                {
+                    self.successful_executions = self.succeeded;
+                    self.failed_executions = self.failed;
+                    self.panicked_executions = self.panicked;
+                }
+            }
         }
-    }
+    )*};
 }
+
+impl_job_metric_aggregation!(JobMetricsTotals, JobMetricsPoint);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JobMetricsPoint {
@@ -200,51 +206,6 @@ pub struct JobMetricsPoint {
     pub panicked_executions: u64,
     /// Total duration for successful worker executions. Batch duration counts once per batch.
     pub execution_ms: u64,
-}
-
-impl JobMetricsPoint {
-    #[must_use]
-    pub fn average_execution_ms(&self) -> f64 {
-        if self.successful_executions == 0 {
-            0.0
-        } else {
-            self.execution_ms as f64 / self.successful_executions as f64
-        }
-    }
-
-    #[must_use]
-    pub fn failed_executions_without_panics(&self) -> u64 {
-        self.failed_executions
-            .saturating_sub(self.panicked_executions)
-    }
-
-    fn add_metric(&mut self, metric: &str, value: u64) {
-        match metric {
-            METRIC_PROCESSED_JOBS => self.processed = self.processed.saturating_add(value),
-            METRIC_FAILED_JOBS => self.failed = self.failed.saturating_add(value),
-            METRIC_PANICKED_JOBS => self.panicked = self.panicked.saturating_add(value),
-            METRIC_SUCCESSFUL_EXECUTIONS => {
-                self.successful_executions = self.successful_executions.saturating_add(value);
-            }
-            METRIC_FAILED_EXECUTIONS => {
-                self.failed_executions = self.failed_executions.saturating_add(value);
-            }
-            METRIC_PANICKED_EXECUTIONS => {
-                self.panicked_executions = self.panicked_executions.saturating_add(value);
-            }
-            METRIC_EXECUTION_MS => self.execution_ms = self.execution_ms.saturating_add(value),
-            _ => {}
-        }
-    }
-
-    fn finalize(&mut self) {
-        self.succeeded = self.processed.saturating_sub(self.failed);
-        if self.successful_executions + self.failed_executions + self.panicked_executions == 0 {
-            self.successful_executions = self.succeeded;
-            self.failed_executions = self.failed;
-            self.panicked_executions = self.panicked;
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -161,6 +161,53 @@ fn downsample_job_metrics_points(
         .collect()
 }
 
+macro_rules! impl_queue_view_helpers {
+    ($($ty:ty),* $(,)?) => {$(
+        impl $ty {
+            pub fn concurrency_for(&self, key: &str) -> String {
+                concurrency_for(&self.queue_configs, key)
+            }
+
+            pub fn default_concurrency_for(&self, key: &str) -> String {
+                default_concurrency_for(&self.queue_configs, key)
+            }
+
+            pub fn has_concurrency_override_for(&self, key: &str) -> bool {
+                has_concurrency_override_for(&self.queue_configs, key)
+            }
+
+            pub fn state_for(&self, key: &str) -> String {
+                state_for(&self.queue_configs, key)
+            }
+
+            pub fn state_class_for(&self, key: &str) -> &'static str {
+                state_class_for(&self.queue_configs, key)
+            }
+
+            pub fn dynamic_queue_key(&self, key: &str, suffix: &str) -> String {
+                format!("{key}#{suffix}")
+            }
+        }
+    )*};
+}
+
+macro_rules! impl_busy_helpers {
+    ($($ty:ty),* $(,)?) => {$(
+        impl $ty {
+            pub fn busy_for(&self, key: &str) -> usize {
+                busy_for(&self.stats, key)
+            }
+
+            pub fn busy_for_process(&self, process: &oxana::Process) -> usize {
+                busy_for_process(&self.stats, process)
+            }
+        }
+    )*};
+}
+
+impl_queue_view_helpers!(DashboardTemplate, BusyTemplate, QueuesTemplate);
+impl_busy_helpers!(DashboardTemplate, BusyTemplate);
+
 #[derive(Template, WebTemplate)]
 #[template(path = "dashboard.html")]
 pub(crate) struct DashboardTemplate {
@@ -170,40 +217,6 @@ pub(crate) struct DashboardTemplate {
     pub queue_configs: HashMap<String, QueueRuntimeConfigView>,
 }
 
-impl DashboardTemplate {
-    pub fn concurrency_for(&self, key: &str) -> String {
-        concurrency_for(&self.queue_configs, key)
-    }
-
-    pub fn default_concurrency_for(&self, key: &str) -> String {
-        default_concurrency_for(&self.queue_configs, key)
-    }
-
-    pub fn has_concurrency_override_for(&self, key: &str) -> bool {
-        has_concurrency_override_for(&self.queue_configs, key)
-    }
-
-    pub fn state_for(&self, key: &str) -> String {
-        state_for(&self.queue_configs, key)
-    }
-
-    pub fn state_class_for(&self, key: &str) -> &'static str {
-        state_class_for(&self.queue_configs, key)
-    }
-
-    pub fn dynamic_queue_key(&self, key: &str, suffix: &str) -> String {
-        format!("{key}#{suffix}")
-    }
-
-    pub fn busy_for(&self, key: &str) -> usize {
-        busy_for(&self.stats, key)
-    }
-
-    pub fn busy_for_process(&self, process: &oxana::Process) -> usize {
-        busy_for_process(&self.stats, process)
-    }
-}
-
 #[derive(Template, WebTemplate)]
 #[template(path = "busy.html")]
 pub(crate) struct BusyTemplate {
@@ -211,40 +224,6 @@ pub(crate) struct BusyTemplate {
     pub active_tab: &'static str,
     pub stats: oxana::Stats,
     pub queue_configs: HashMap<String, QueueRuntimeConfigView>,
-}
-
-impl BusyTemplate {
-    pub fn concurrency_for(&self, key: &str) -> String {
-        concurrency_for(&self.queue_configs, key)
-    }
-
-    pub fn default_concurrency_for(&self, key: &str) -> String {
-        default_concurrency_for(&self.queue_configs, key)
-    }
-
-    pub fn has_concurrency_override_for(&self, key: &str) -> bool {
-        has_concurrency_override_for(&self.queue_configs, key)
-    }
-
-    pub fn state_for(&self, key: &str) -> String {
-        state_for(&self.queue_configs, key)
-    }
-
-    pub fn state_class_for(&self, key: &str) -> &'static str {
-        state_class_for(&self.queue_configs, key)
-    }
-
-    pub fn dynamic_queue_key(&self, key: &str, suffix: &str) -> String {
-        format!("{key}#{suffix}")
-    }
-
-    pub fn busy_for(&self, key: &str) -> usize {
-        busy_for(&self.stats, key)
-    }
-
-    pub fn busy_for_process(&self, process: &oxana::Process) -> usize {
-        busy_for_process(&self.stats, process)
-    }
 }
 
 #[derive(Template, WebTemplate)]
@@ -288,30 +267,6 @@ impl QueuesTemplate {
             self.next_dir(col),
             self.queue_lengths.minutes
         )
-    }
-
-    pub fn concurrency_for(&self, key: &str) -> String {
-        concurrency_for(&self.queue_configs, key)
-    }
-
-    pub fn default_concurrency_for(&self, key: &str) -> String {
-        default_concurrency_for(&self.queue_configs, key)
-    }
-
-    pub fn has_concurrency_override_for(&self, key: &str) -> bool {
-        has_concurrency_override_for(&self.queue_configs, key)
-    }
-
-    pub fn state_for(&self, key: &str) -> String {
-        state_for(&self.queue_configs, key)
-    }
-
-    pub fn state_class_for(&self, key: &str) -> &'static str {
-        state_class_for(&self.queue_configs, key)
-    }
-
-    pub fn dynamic_queue_key(&self, key: &str, suffix: &str) -> String {
-        format!("{key}#{suffix}")
     }
 
     pub fn queue_length_chart_data_json(&self) -> String {
