@@ -1,4 +1,5 @@
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum OxanaError {
     #[error("Generic error: {0}")]
     GenericError(String),
@@ -28,8 +29,6 @@ pub enum OxanaError {
     DeadpoolRedisBuildError(#[from] deadpool_redis::BuildError),
     #[error("Config error: {0}")]
     ConfigError(String),
-    #[error("Job panicked: {0}")]
-    JobPanicked(String),
     #[error("Job state json error: {0}")]
     JobStateJsonError(serde_json::Error),
 }

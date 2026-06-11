@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file.
 - Add a required `legacy_names` field to `WorkerConfig` for manual worker registrations (the derive and `register_worker` fill it with the worker's type name).
 - Own job values during execution instead of borrowing them, so job payload types no longer need to implement `Sync`.
 - Simplify structured job progress to cursor/total values. `JobProgress` no longer exposes a separate `processed` field, and `update_progress` tuple helpers now use `(cursor, total)` or `(cursor, total, note)`.
+- Remove unused convenience accessors: `JobMeta::{created_at_millis, scheduled_at_millis, scheduled_at_secs, latency_secs, started_at_secs, started_at_millis}`, `JobMetricsTotals::execution_seconds`, `JobProgressIterator::current_index`, and the never-raised `OxanaError::JobPanicked` variant.
+- Mark `OxanaError` as `#[non_exhaustive]`. Downstream `match` expressions on the error enum must add a wildcard arm; future variant additions will no longer be breaking.
 
 ### Added
 

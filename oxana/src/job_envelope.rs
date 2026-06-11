@@ -169,18 +169,6 @@ impl JobMeta {
         self.created_at / 1000000
     }
 
-    pub fn created_at_millis(&self) -> i64 {
-        self.created_at / 1000
-    }
-
-    pub fn scheduled_at_millis(&self) -> i64 {
-        self.scheduled_at / 1000
-    }
-
-    pub fn scheduled_at_secs(&self) -> i64 {
-        self.scheduled_at / 1000000
-    }
-
     pub fn effective_scheduled_at_micros(&self) -> i64 {
         if self.scheduled_at > 0 {
             self.scheduled_at
@@ -194,10 +182,6 @@ impl JobMeta {
             .started_at
             .unwrap_or_else(|| chrono::Utc::now().timestamp_micros());
         (reference - self.effective_scheduled_at_micros()).max(0)
-    }
-
-    pub fn latency_secs(&self) -> i64 {
-        self.latency_micros() / 1000000
     }
 
     pub fn latency_millis(&self) -> i64 {
@@ -215,14 +199,6 @@ impl JobMeta {
     pub fn started_at(&self) -> Option<DateTime<Utc>> {
         self.started_at
             .and_then(DateTime::<Utc>::from_timestamp_micros)
-    }
-
-    pub fn started_at_secs(&self) -> Option<i64> {
-        self.started_at.map(|t| t / 1000000)
-    }
-
-    pub fn started_at_millis(&self) -> Option<i64> {
-        self.started_at.map(|t| t / 1000)
     }
 }
 
@@ -250,8 +226,6 @@ mod tests {
     fn test_started_at_none() {
         let meta = make_meta(1_000_000, None);
         assert!(meta.started_at().is_none());
-        assert!(meta.started_at_secs().is_none());
-        assert!(meta.started_at_millis().is_none());
     }
 
     #[test]
@@ -260,9 +234,10 @@ mod tests {
         let started = scheduled + 5_500_000;
         let meta = make_meta(scheduled, Some(started));
 
-        assert!(meta.started_at().is_some());
-        assert_eq!(meta.started_at_secs(), Some(started / 1_000_000));
-        assert_eq!(meta.started_at_millis(), Some(started / 1_000));
+        assert_eq!(
+            meta.started_at().map(|t| t.timestamp_micros()),
+            Some(started)
+        );
     }
 
     #[test]
@@ -273,7 +248,6 @@ mod tests {
 
         assert_eq!(meta.latency_micros(), 5_500_000);
         assert_eq!(meta.latency_millis(), 5_500);
-        assert_eq!(meta.latency_secs(), 5);
     }
 
     #[test]

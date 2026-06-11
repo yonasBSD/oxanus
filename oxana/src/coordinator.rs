@@ -231,7 +231,7 @@ where
 
     let result = executor::run(Arc::clone(&config), job, &mut envelope).await?;
     drop(pending.permit);
-    process_result(result_tx, result, envelope).await;
+    process_result(result_tx, result, vec![envelope]).await;
 
     Ok(())
 }
@@ -537,7 +537,7 @@ where
 
     let outcome = executor::run_batch(Arc::clone(&config), job, &mut envelopes).await?;
     drop(permits);
-    process_batch_result(result_tx, outcome, envelopes).await;
+    process_result(result_tx, outcome, envelopes).await;
 
     Ok(())
 }
@@ -560,31 +560,6 @@ fn invalid_jobs_by_index(
 async fn process_result(
     result_tx: mpsc::Sender<WorkerResult>,
     outcome: ExecutionOutcome,
-    envelope: JobEnvelope,
-) {
-    let kind = match outcome.result {
-        Ok(()) => WorkerResultKind::Success,
-        Err(e) => match e {
-            ExecutionError::NotPanic => WorkerResultKind::Failed,
-            ExecutionError::Panic() => WorkerResultKind::Panicked,
-        },
-    };
-
-    result_tx
-        .send(WorkerResult {
-            kind,
-            worker_name: envelope.job.name,
-            queue: envelope.queue,
-            execution_ms: outcome.duration_ms,
-            job_count: 1,
-        })
-        .await
-        .ok();
-}
-
-async fn process_batch_result(
-    result_tx: mpsc::Sender<WorkerResult>,
-    outcome: ExecutionOutcome,
     envelopes: Vec<JobEnvelope>,
 ) {
     let kind = match outcome.result {
@@ -595,17 +570,19 @@ async fn process_batch_result(
         },
     };
 
-    let Some(first_envelope) = envelopes.first() else {
+    let job_count = u64::try_from(envelopes.len()).unwrap_or(u64::MAX);
+    let Some(first_envelope) = envelopes.into_iter().next() else {
+        tracing::warn!("Worker result with no envelopes, dropping {:?}", kind);
         return;
     };
 
     result_tx
         .send(WorkerResult {
             kind,
-            worker_name: first_envelope.job.name.clone(),
-            queue: first_envelope.queue.clone(),
+            worker_name: first_envelope.job.name,
+            queue: first_envelope.queue,
             execution_ms: outcome.duration_ms,
-            job_count: u64::try_from(envelopes.len()).unwrap_or(u64::MAX),
+            job_count,
         })
         .await
         .ok();
