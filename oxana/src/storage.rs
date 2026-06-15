@@ -555,6 +555,15 @@ impl Storage {
         self.internal.list_retries(opts).await
     }
 
+    /// Moves all pending retry jobs back to their queues for immediate processing.
+    ///
+    /// # Returns
+    ///
+    /// The number of retry jobs enqueued immediately, or an [`OxanaError`] if the operation fails.
+    pub async fn retry_all_now(&self) -> Result<usize, OxanaError> {
+        self.internal.retry_all_now().await
+    }
+
     /// Returns a list of jobs scheduled for future execution.
     ///
     /// # Arguments
@@ -608,6 +617,15 @@ impl Storage {
     /// An [`OxanaError`] if the operation fails.
     pub async fn wipe_dead(&self) -> Result<(), OxanaError> {
         self.internal.wipe_dead().await
+    }
+
+    /// Moves all dead jobs back to their queues for immediate processing.
+    ///
+    /// # Returns
+    ///
+    /// The number of dead jobs revived, or an [`OxanaError`] if the operation fails.
+    pub async fn revive_all_dead(&self) -> Result<usize, OxanaError> {
+        self.internal.revive_all_dead().await
     }
 
     /// Returns Prometheus metrics based on the current stats.

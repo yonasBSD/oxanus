@@ -245,6 +245,14 @@ pub(crate) async fn wipe_dead(
     Ok(Redirect::to(&format!("{}/dead", state.base_path)))
 }
 
+pub(crate) async fn revive_all_dead(
+    Extension(state): Extension<OxanaWebState>,
+) -> Result<Redirect, OxanaWebError> {
+    state.storage.revive_all_dead().await?;
+
+    Ok(Redirect::to(&format!("{}/dead", state.base_path)))
+}
+
 pub(crate) async fn retry_jobs(
     Extension(state): Extension<OxanaWebState>,
     Query(params): Query<PaginationParams>,
@@ -267,6 +275,14 @@ pub(crate) async fn retry_jobs(
         total,
         has_next,
     })
+}
+
+pub(crate) async fn retry_all_now(
+    Extension(state): Extension<OxanaWebState>,
+) -> Result<Redirect, OxanaWebError> {
+    state.storage.retry_all_now().await?;
+
+    Ok(Redirect::to(&format!("{}/retries", state.base_path)))
 }
 
 pub(crate) async fn job_detail(
