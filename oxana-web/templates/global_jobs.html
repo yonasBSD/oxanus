@@ -25,8 +25,18 @@
             <div class="flex items-center gap-2 text-sm">
                 {% if kind.is_dead() %}
                 {% if total > 0 %}
+                <form method="POST" action="{{ base_path }}/dead/revive_all" onsubmit="return confirmReviveAllDead()">
+                    <button type="submit" class="px-3 py-1 rounded bg-green-900/50 border border-green-800 hover:bg-green-800 text-green-300 transition-colors">Revive All</button>
+                </form>
                 <form method="POST" action="{{ base_path }}/dead/wipe" onsubmit="return confirmWipeDead()">
                     <button type="submit" class="px-3 py-1 rounded bg-red-900/50 border border-red-800 hover:bg-red-800 text-red-300 transition-colors">Wipe</button>
+                </form>
+                {% endif %}
+                {% endif %}
+                {% if kind.is_retries() %}
+                {% if total > 0 %}
+                <form method="POST" action="{{ base_path }}/retries/retry_all_now" onsubmit="return confirmRetryAllNow()">
+                    <button type="submit" class="px-3 py-1 rounded bg-orange-900/50 border border-orange-800 hover:bg-orange-800 text-orange-300 transition-colors">Retry All Now</button>
                 </form>
                 {% endif %}
                 {% endif %}
@@ -187,6 +197,12 @@
     function confirmWipeDead() {
         var input = prompt('Type WIPE to permanently remove all dead jobs.');
         return input === 'WIPE';
+    }
+    function confirmReviveAllDead() {
+        return confirm('Revive all dead jobs now?');
+    }
+    function confirmRetryAllNow() {
+        return confirm('Retry all pending retry jobs now?');
     }
     </script>
 </body>

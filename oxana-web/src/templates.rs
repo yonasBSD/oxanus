@@ -1006,6 +1006,10 @@ impl JobListKind {
         matches!(self, Self::Dead)
     }
 
+    pub fn is_retries(&self) -> bool {
+        matches!(self, Self::Retries)
+    }
+
     pub fn dot_class(&self) -> &'static str {
         match self {
             Self::Dead => "bg-red-400",
@@ -1148,6 +1152,44 @@ mod job_card_tests {
         let rendered = template.render().unwrap();
 
         assert!(rendered.contains("href=\"/admin/jobs/crate%3A%3AWorker%2Ftype-123\""));
+    }
+
+    #[test]
+    fn dead_jobs_template_renders_revive_all_action() {
+        let template = GlobalJobsTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/dead",
+            kind: JobListKind::Dead,
+            jobs: vec![job_envelope(json!({}))],
+            page: 1,
+            total: 1,
+            has_next: false,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("action=\"/admin/dead/revive_all\""));
+        assert!(rendered.contains(">Revive All</button>"));
+        assert!(rendered.contains("confirmReviveAllDead()"));
+    }
+
+    #[test]
+    fn retries_template_renders_retry_all_now_action() {
+        let template = GlobalJobsTemplate {
+            base_path: "/admin".to_string(),
+            active_tab: "/retries",
+            kind: JobListKind::Retries,
+            jobs: vec![job_envelope(json!({}))],
+            page: 1,
+            total: 1,
+            has_next: false,
+        };
+
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains("action=\"/admin/retries/retry_all_now\""));
+        assert!(rendered.contains(">Retry All Now</button>"));
+        assert!(rendered.contains("confirmRetryAllNow()"));
     }
 }
 

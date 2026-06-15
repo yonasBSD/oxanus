@@ -645,8 +645,18 @@ impl StorageInternal {
     pub async fn enqueue_scheduled(&self, schedule_queue: &str) -> Result<usize, OxanaError> {
         let now = chrono::Utc::now().timestamp_micros();
         let mut redis = self.connection().await?;
-        let job_ids: Vec<String> = redis.zrangebyscore(schedule_queue, 0, now).await?;
+        let job_ids: Vec<JobId> = redis.zrangebyscore(schedule_queue, 0, now).await?;
 
+        self.claim_and_enqueue_scheduled_job_ids(&mut redis, schedule_queue, job_ids)
+            .await
+    }
+
+    async fn claim_and_enqueue_scheduled_job_ids(
+        &self,
+        redis: &mut deadpool_redis::Connection,
+        schedule_queue: &str,
+        job_ids: Vec<JobId>,
+    ) -> Result<usize, OxanaError> {
         if job_ids.is_empty() {
             return Ok(0);
         }
@@ -655,12 +665,12 @@ impl StorageInternal {
         for job_id in &job_ids {
             claim_pipe.zrem(schedule_queue, job_id);
         }
-        let claimed: Vec<u32> = claim_pipe.query_async(&mut redis).await?;
+        let claimed: Vec<u32> = claim_pipe.query_async(&mut *redis).await?;
 
-        let claimed_job_ids: Vec<String> = job_ids
+        let claimed_job_ids: Vec<JobId> = job_ids
             .into_iter()
-            .zip(claimed.iter())
-            .filter(|(_, removed)| **removed > 0)
+            .zip(claimed)
+            .filter(|(_, removed)| *removed > 0)
             .map(|(id, _)| id)
             .collect();
 
@@ -684,9 +694,17 @@ impl StorageInternal {
             enqueue_pipe.lpush(self.namespace_queue(queue), job_ids);
         }
 
-        let _: () = enqueue_pipe.query_async(&mut redis).await?;
+        let _: () = enqueue_pipe.query_async(&mut *redis).await?;
 
         Ok(envelopes_count)
+    }
+
+    pub async fn retry_all_now(&self) -> Result<usize, OxanaError> {
+        let mut redis = self.connection().await?;
+        let job_ids: Vec<JobId> = (*redis).zrange(&self.keys.retry, 0, -1).await?;
+
+        self.claim_and_enqueue_scheduled_job_ids(&mut redis, &self.keys.retry, job_ids)
+            .await
     }
 
     pub async fn list_queue_jobs(
@@ -729,6 +747,81 @@ impl StorageInternal {
     pub async fn wipe_dead(&self) -> Result<(), OxanaError> {
         let mut redis = self.connection().await?;
         let _: () = (*redis).del(&self.keys.dead).await?;
+        Ok(())
+    }
+
+    pub async fn revive_all_dead(&self) -> Result<usize, OxanaError> {
+        let claim_key = format!("{}:reviving:{}", self.keys.dead, uuid::Uuid::new_v4());
+        let mut redis = self.connection().await?;
+        let claimed: i32 = redis::cmd("EVAL")
+            .arg(
+                r"
+            if redis.call('EXISTS', KEYS[1]) == 0 then
+                return 0
+            end
+            redis.call('RENAME', KEYS[1], KEYS[2])
+            return 1
+            ",
+            )
+            .arg(2)
+            .arg(&self.keys.dead)
+            .arg(&claim_key)
+            .query_async(&mut redis)
+            .await?;
+
+        if claimed == 0 {
+            return Ok(0);
+        }
+
+        let entries: Vec<String> = (*redis).lrange(&claim_key, 0, -1).await?;
+        drop(redis);
+
+        let mut revived_count = 0;
+        let mut entries = entries.into_iter();
+        while let Some(entry) = entries.next() {
+            let Ok(job) = serde_json::from_str::<JobEnvelope>(&entry) else {
+                continue;
+            };
+
+            if let Err(error) = self.enqueue(job).await {
+                let mut entries_to_restore = vec![entry];
+                entries_to_restore.extend(entries);
+                if let Err(restore_error) = self
+                    .restore_claimed_dead_entries(&claim_key, entries_to_restore)
+                    .await
+                {
+                    tracing::error!("Failed to restore claimed dead jobs: {}", restore_error);
+                }
+                return Err(error);
+            }
+
+            revived_count += 1;
+        }
+
+        let mut redis = self.connection().await?;
+        let _: () = (*redis).del(&claim_key).await?;
+
+        Ok(revived_count)
+    }
+
+    async fn restore_claimed_dead_entries(
+        &self,
+        claim_key: &str,
+        entries: Vec<String>,
+    ) -> Result<(), OxanaError> {
+        let mut redis = self.connection().await?;
+
+        if entries.is_empty() {
+            let _: () = (*redis).del(claim_key).await?;
+            return Ok(());
+        }
+
+        let _: () = redis::pipe()
+            .rpush(&self.keys.dead, entries)
+            .del(claim_key)
+            .query_async(&mut redis)
+            .await?;
+
         Ok(())
     }
 
@@ -3127,6 +3220,96 @@ mod tests {
                 .await?
                 .is_empty()
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_revive_all_dead() -> TestResult {
+        let storage = StorageInternal::new(redis_pool().await?, Some(random_string()));
+        let queue = random_string();
+        let envelope1 = JobEnvelope::new(queue.clone(), TestJob {})?;
+        let envelope2 = JobEnvelope::new(queue.clone(), TestJob {})?;
+
+        storage.kill(&envelope1, "first failed".to_string()).await?;
+        storage
+            .kill(&envelope2, "second failed".to_string())
+            .await?;
+
+        assert_eq!(storage.dead_count().await?, 2);
+        assert_eq!(storage.enqueued_count(&queue).await?, 0);
+
+        let revived = storage.revive_all_dead().await?;
+
+        assert_eq!(revived, 2);
+        assert_eq!(storage.dead_count().await?, 0);
+        assert_eq!(storage.enqueued_count(&queue).await?, 2);
+        assert!(storage.get_job(&envelope1.id).await?.is_some());
+        assert!(storage.get_job(&envelope2.id).await?.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_restore_claimed_dead_entries_skips_already_revived_entries() -> TestResult {
+        let storage = StorageInternal::new(redis_pool().await?, Some(random_string()));
+        let queue = random_string();
+        let revived = JobEnvelope::new(queue, TestJob {})?;
+        let remaining = JobEnvelope::new(random_string(), TestJob {})?;
+        let revived_entry = serde_json::to_string(&revived)?;
+        let remaining_entry = serde_json::to_string(&remaining)?;
+        let claim_key = format!("{}:reviving:{}", storage.keys.dead, uuid::Uuid::new_v4());
+
+        let mut redis = storage.connection().await?;
+        let _: () = (*redis)
+            .rpush(&claim_key, &[&revived_entry, &remaining_entry])
+            .await?;
+        drop(redis);
+
+        storage
+            .restore_claimed_dead_entries(&claim_key, vec![remaining_entry.clone()])
+            .await?;
+
+        let mut redis = storage.connection().await?;
+        let claim_exists: bool = (*redis).exists(&claim_key).await?;
+        let restored: Vec<String> = (*redis).lrange(&storage.keys.dead, 0, -1).await?;
+        drop(redis);
+
+        assert!(!claim_exists);
+        assert_eq!(restored, vec![remaining_entry]);
+        assert!(!restored.contains(&revived_entry));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retry_all_now_enqueues_all_pending_retries() -> TestResult {
+        let storage = StorageInternal::new(redis_pool().await?, Some(random_string()));
+        let queue = random_string();
+        let envelope1 = JobEnvelope::new(queue.clone(), TestJob {})?;
+        let envelope2 = JobEnvelope::new(queue.clone(), TestJob {})?;
+
+        storage.enqueue(envelope1.clone()).await?;
+        storage.enqueue(envelope2.clone()).await?;
+        assert_eq!(storage.dequeue(&queue).await?, Some(envelope1.id.clone()));
+        assert_eq!(storage.dequeue(&queue).await?, Some(envelope2.id.clone()));
+        storage.finish_with_failure(&envelope1).await?;
+        storage.finish_with_failure(&envelope2).await?;
+        storage
+            .retry_in(envelope1.id.clone(), 3_600, "first failed".to_string())
+            .await?;
+        storage
+            .retry_in(envelope2.id.clone(), 3_600, "second failed".to_string())
+            .await?;
+
+        assert_eq!(storage.retries_count().await?, 2);
+        assert_eq!(storage.enqueued_count(&queue).await?, 0);
+
+        let retried = storage.retry_all_now().await?;
+
+        assert_eq!(retried, 2);
+        assert_eq!(storage.retries_count().await?, 0);
+        assert_eq!(storage.enqueued_count(&queue).await?, 2);
 
         Ok(())
     }
