@@ -137,6 +137,65 @@ impl Storage {
         self.enqueue_in(queue, job, 0).await
     }
 
+    /// Enqueues multiple jobs to the same queue for immediate processing.
+    ///
+    /// The returned job IDs are in the same order as the input jobs. Unique-job
+    /// conflict handling is the same as [`enqueue`](Self::enqueue): skipped jobs
+    /// return their existing deterministic job ID, and replace conflicts update
+    /// the stored job before enqueueing it again.
+    ///
+    /// # Arguments
+    ///
+    /// * `queue` - The queue to enqueue the jobs to
+    /// * `jobs` - The jobs to enqueue (each must implement [`Job`])
+    ///
+    /// # Returns
+    ///
+    /// A vector of [`JobId`]s that can be used to track the jobs, or an
+    /// [`OxanaError`] if the operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use oxana::{Storage, Queue, Job};
+    ///
+    /// async fn example(storage: &Storage) -> Result<(), oxana::OxanaError> {
+    ///     let job_ids = storage
+    ///         .enqueue_list(
+    ///             MyQueue,
+    ///             vec![
+    ///                 MyJob { data: "first" },
+    ///                 MyJob { data: "second" },
+    ///             ],
+    ///         )
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn enqueue_list<T, Jobs>(
+        &self,
+        queue: impl Queue,
+        jobs: Jobs,
+    ) -> Result<Vec<JobId>, OxanaError>
+    where
+        T: Job + 'static,
+        Jobs: IntoIterator<Item = T>,
+    {
+        let queue_key = queue.key();
+        let envelopes = jobs
+            .into_iter()
+            .map(|job| JobEnvelope::new(queue_key.clone(), job))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        tracing::trace!(
+            queue = queue_key,
+            count = envelopes.len(),
+            "Enqueuing job list"
+        );
+
+        self.internal.enqueue_list(envelopes).await
+    }
+
     /// Enqueues a job to be processed after a specified delay.
     ///
     /// # Arguments

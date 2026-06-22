@@ -310,12 +310,27 @@ impl StorageInternal {
             .await
     }
 
+    pub async fn enqueue_list(
+        &self,
+        envelopes: Vec<JobEnvelope>,
+    ) -> Result<Vec<JobId>, OxanaError> {
+        if envelopes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut redis = self.connection().await?;
+        self.enqueue_list_w_conn(&mut redis, envelopes, JobDestination::Queue)
+            .await
+    }
+
     async fn enqueue_w_conn(
         &self,
         redis: &mut deadpool_redis::Connection,
         envelope: JobEnvelope,
         destination: JobDestination,
     ) -> Result<JobId, OxanaError> {
+        let mut pipe = redis::pipe();
+
         match self.job_enqueue_action(redis, &envelope).await? {
             JobEnqueueAction::Skip => {
                 tracing::warn!("Unique job {} already exists, skipping", envelope.id);
@@ -325,22 +340,89 @@ impl StorageInternal {
             JobEnqueueAction::Replace { existing_queue } => {
                 tracing::warn!("Unique job {} already exists, replacing", envelope.id);
 
-                self.replace_w_conn(redis, &existing_queue, &envelope, destination)
-                    .await?;
+                self.append_replace(&mut pipe, &existing_queue, &envelope, destination)?;
             }
             JobEnqueueAction::Default => {
-                let mut pipe = redis::pipe();
-                pipe.hset(
-                    &self.keys.jobs,
-                    &envelope.id,
-                    serde_json::to_string(&envelope)?,
-                );
-                self.push_to_destination(&mut pipe, &envelope, destination);
-                let _: () = pipe.query_async(&mut *redis).await?;
+                self.append_enqueue(&mut pipe, &envelope, destination)?;
             }
         }
 
+        let _: () = pipe.query_async(&mut *redis).await?;
+
         Ok(envelope.id)
+    }
+
+    async fn enqueue_list_w_conn(
+        &self,
+        redis: &mut deadpool_redis::Connection,
+        envelopes: Vec<JobEnvelope>,
+        destination: JobDestination,
+    ) -> Result<Vec<JobId>, OxanaError> {
+        let mut pipe = redis::pipe();
+        let mut has_writes = false;
+        let mut job_ids = Vec::with_capacity(envelopes.len());
+        let mut staged_unique_queues: HashMap<JobId, String> = HashMap::new();
+
+        for envelope in envelopes {
+            let job_id = envelope.id.clone();
+
+            let action = if envelope.meta.unique {
+                match staged_unique_queues.get(&envelope.id) {
+                    Some(existing_queue) => match envelope.meta.on_conflict.as_ref() {
+                        Some(JobConflictStrategy::Replace) => JobEnqueueAction::Replace {
+                            existing_queue: existing_queue.clone(),
+                        },
+                        Some(JobConflictStrategy::Skip) | None => JobEnqueueAction::Skip,
+                    },
+                    None => self.job_enqueue_action(redis, &envelope).await?,
+                }
+            } else {
+                JobEnqueueAction::Default
+            };
+
+            match action {
+                JobEnqueueAction::Skip => {
+                    tracing::warn!("Unique job {} already exists, skipping", envelope.id);
+                }
+                JobEnqueueAction::Replace { existing_queue } => {
+                    tracing::warn!("Unique job {} already exists, replacing", envelope.id);
+
+                    self.append_replace(&mut pipe, &existing_queue, &envelope, destination)?;
+                    staged_unique_queues.insert(job_id.clone(), envelope.queue.clone());
+                    has_writes = true;
+                }
+                JobEnqueueAction::Default => {
+                    self.append_enqueue(&mut pipe, &envelope, destination)?;
+                    if envelope.meta.unique {
+                        staged_unique_queues.insert(job_id.clone(), envelope.queue.clone());
+                    }
+                    has_writes = true;
+                }
+            }
+
+            job_ids.push(job_id);
+        }
+
+        if has_writes {
+            let _: () = pipe.query_async(&mut *redis).await?;
+        }
+
+        Ok(job_ids)
+    }
+
+    fn append_enqueue(
+        &self,
+        pipe: &mut redis::Pipeline,
+        envelope: &JobEnvelope,
+        destination: JobDestination,
+    ) -> Result<(), OxanaError> {
+        pipe.hset(
+            &self.keys.jobs,
+            &envelope.id,
+            serde_json::to_string(envelope)?,
+        );
+        self.push_to_destination(pipe, envelope, destination);
+        Ok(())
     }
 
     fn push_to_destination(
@@ -391,16 +473,15 @@ impl StorageInternal {
         }
     }
 
-    async fn replace_w_conn(
+    fn append_replace(
         &self,
-        redis: &mut deadpool_redis::Connection,
+        pipe: &mut redis::Pipeline,
         existing_queue: &str,
         envelope: &JobEnvelope,
         destination: JobDestination,
     ) -> Result<(), OxanaError> {
         let old_queue = self.namespace_queue(existing_queue);
 
-        let mut pipe = redis::pipe();
         pipe.hset(
             &self.keys.jobs,
             &envelope.id,
@@ -414,9 +495,8 @@ impl StorageInternal {
             pipe.lrem(self.namespace_queue(&envelope.queue), 0, &envelope.id);
         }
 
-        self.push_to_destination(&mut pipe, envelope, destination);
+        self.push_to_destination(pipe, envelope, destination);
 
-        let _: () = pipe.query_async(&mut *redis).await?;
         Ok(())
     }
 
