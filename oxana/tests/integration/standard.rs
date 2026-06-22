@@ -140,6 +140,66 @@ pub async fn test_standard() -> TestResult {
 }
 
 #[tokio::test]
+pub async fn test_enqueue_list() -> TestResult {
+    let redis_pool = setup();
+    let mut redis_conn = redis_pool.get().await?;
+
+    let ctx = WorkerState {
+        redis: redis_pool.clone(),
+    };
+
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerRedisSet, WorkerRedisSetJob>()
+        .exit_when_processed(3);
+
+    let key1 = random_string();
+    let key2 = random_string();
+    let key3 = random_string();
+
+    let job_ids = storage
+        .enqueue_list(
+            QueueOne,
+            vec![
+                WorkerRedisSetJob {
+                    key: key1.clone(),
+                    value: "first".to_string(),
+                },
+                WorkerRedisSetJob {
+                    key: key2.clone(),
+                    value: "second".to_string(),
+                },
+                WorkerRedisSetJob {
+                    key: key3.clone(),
+                    value: "third".to_string(),
+                },
+            ],
+        )
+        .await?;
+
+    assert_eq!(job_ids.len(), 3);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 3);
+
+    runtime.run().await?;
+
+    let value1: Option<String> = redis_conn.get(key1).await?;
+    let value2: Option<String> = redis_conn.get(key2).await?;
+    let value3: Option<String> = redis_conn.get(key3).await?;
+
+    assert_eq!(value1, Some("first".to_string()));
+    assert_eq!(value2, Some("second".to_string()));
+    assert_eq!(value3, Some("third".to_string()));
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
+    assert_eq!(storage.jobs_count().await?, 0);
+
+    Ok(())
+}
+
+#[tokio::test]
 pub async fn test_shutdown_keeps_heartbeat_until_workers_finish() -> TestResult {
     let redis_pool = setup();
     let storage = oxana::Storage::builder()

@@ -224,6 +224,108 @@ pub async fn test_unique_skip() -> TestResult {
 }
 
 #[tokio::test]
+pub async fn test_enqueue_list_unique_skip_deduplicates_within_batch() -> TestResult {
+    let redis_pool = setup();
+    let mut redis_conn = redis_pool.get().await?;
+    let ctx = WorkerState {
+        redis: redis_pool.clone(),
+    };
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerUniqueSkip, WorkerUniqueSkipJob>()
+        .exit_when_processed(1);
+    let key = random_string();
+
+    let job_ids = storage
+        .enqueue_list(
+            QueueOne,
+            vec![
+                WorkerUniqueSkipJob {
+                    id: 1,
+                    key: key.clone(),
+                    value: 1,
+                },
+                WorkerUniqueSkipJob {
+                    id: 1,
+                    key: key.clone(),
+                    value: 2,
+                },
+            ],
+        )
+        .await?;
+
+    assert_eq!(job_ids.len(), 2);
+    assert_eq!(job_ids[0], job_ids[1]);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 1);
+
+    runtime.run().await?;
+
+    assert_eq!(storage.dead_count().await?, 0);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
+    assert_eq!(storage.jobs_count().await?, 0);
+
+    let value: Option<i32> = redis_conn.get(key).await?;
+    assert_eq!(value, Some(1));
+
+    Ok(())
+}
+
+#[tokio::test]
+pub async fn test_enqueue_list_unique_replace_deduplicates_within_batch() -> TestResult {
+    let redis_pool = setup();
+    let mut redis_conn = redis_pool.get().await?;
+    let ctx = WorkerState {
+        redis: redis_pool.clone(),
+    };
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerUniqueReplace, WorkerUniqueReplaceJob>()
+        .exit_when_processed(1);
+    let key = random_string();
+
+    let job_ids = storage
+        .enqueue_list(
+            QueueOne,
+            vec![
+                WorkerUniqueReplaceJob {
+                    id: 1,
+                    key: key.clone(),
+                    value: 1,
+                },
+                WorkerUniqueReplaceJob {
+                    id: 1,
+                    key: key.clone(),
+                    value: 2,
+                },
+            ],
+        )
+        .await?;
+
+    assert_eq!(job_ids.len(), 2);
+    assert_eq!(job_ids[0], job_ids[1]);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 1);
+
+    runtime.run().await?;
+
+    assert_eq!(storage.dead_count().await?, 0);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
+    assert_eq!(storage.jobs_count().await?, 0);
+
+    let value: Option<i32> = redis_conn.get(key).await?;
+    assert_eq!(value, Some(2));
+
+    Ok(())
+}
+
+#[tokio::test]
 pub async fn test_unique_replace_clears_stale_retry_entry() -> TestResult {
     let redis_pool = setup();
     let ctx = WorkerState {
