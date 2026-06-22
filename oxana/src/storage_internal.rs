@@ -372,39 +372,32 @@ impl StorageInternal {
 
             for envelope in chunk {
                 let job_id = envelope.id.clone();
+                let action = self
+                    .enqueue_list_action(redis, envelope, &staged_unique_queues)
+                    .await?;
 
-                let action = if envelope.meta.unique {
-                    match staged_unique_queues.get(&envelope.id) {
-                        Some(existing_queue) => match envelope.meta.on_conflict.as_ref() {
-                            Some(JobConflictStrategy::Replace) => JobEnqueueAction::Replace {
-                                existing_queue: existing_queue.clone(),
-                            },
-                            Some(JobConflictStrategy::Skip) | None => JobEnqueueAction::Skip,
-                        },
-                        None => self.job_enqueue_action(redis, envelope).await?,
-                    }
-                } else {
-                    JobEnqueueAction::Default
-                };
-
-                match action {
+                let wrote = match action {
                     JobEnqueueAction::Skip => {
                         tracing::warn!("Unique job {} already exists, skipping", envelope.id);
+                        false
                     }
                     JobEnqueueAction::Replace { existing_queue } => {
                         tracing::warn!("Unique job {} already exists, replacing", envelope.id);
 
                         self.append_replace(&mut pipe, &existing_queue, envelope, destination)?;
-                        staged_unique_queues.insert(job_id.clone(), envelope.queue.clone());
-                        has_writes = true;
+                        true
                     }
                     JobEnqueueAction::Default => {
                         self.append_enqueue(&mut pipe, envelope, destination)?;
-                        if envelope.meta.unique {
-                            staged_unique_queues.insert(job_id.clone(), envelope.queue.clone());
-                        }
-                        has_writes = true;
+                        true
                     }
+                };
+
+                if wrote {
+                    if envelope.meta.unique {
+                        staged_unique_queues.insert(job_id.clone(), envelope.queue.clone());
+                    }
+                    has_writes = true;
                 }
 
                 job_ids.push(job_id);
@@ -416,6 +409,28 @@ impl StorageInternal {
         }
 
         Ok(job_ids)
+    }
+
+    async fn enqueue_list_action(
+        &self,
+        redis: &mut deadpool_redis::Connection,
+        envelope: &JobEnvelope,
+        staged_unique_queues: &HashMap<JobId, String>,
+    ) -> Result<JobEnqueueAction, OxanaError> {
+        if !envelope.meta.unique {
+            return Ok(JobEnqueueAction::Default);
+        }
+
+        let Some(existing_queue) = staged_unique_queues.get(&envelope.id) else {
+            return self.job_enqueue_action(redis, envelope).await;
+        };
+
+        match envelope.meta.on_conflict.as_ref() {
+            Some(JobConflictStrategy::Replace) => Ok(JobEnqueueAction::Replace {
+                existing_queue: existing_queue.clone(),
+            }),
+            Some(JobConflictStrategy::Skip) | None => Ok(JobEnqueueAction::Skip),
+        }
     }
 
     fn append_enqueue(

@@ -275,6 +275,53 @@ pub async fn test_enqueue_list_unique_skip_deduplicates_within_batch() -> TestRe
 }
 
 #[tokio::test]
+pub async fn test_enqueue_list_unique_skip_deduplicates_across_chunks() -> TestResult {
+    let redis_pool = setup();
+    let mut redis_conn = redis_pool.get().await?;
+    let ctx = WorkerState {
+        redis: redis_pool.clone(),
+    };
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerUniqueSkip, WorkerUniqueSkipJob>()
+        .exit_when_processed(100);
+    let duplicate_key = random_string();
+
+    let jobs = (0..101)
+        .map(|idx| WorkerUniqueSkipJob {
+            id: if idx == 100 { 99 } else { idx },
+            key: if idx >= 99 {
+                duplicate_key.clone()
+            } else {
+                random_string()
+            },
+            value: idx,
+        })
+        .collect::<Vec<_>>();
+
+    let job_ids = storage.enqueue_list(QueueOne, jobs).await?;
+
+    assert_eq!(job_ids.len(), 101);
+    assert_eq!(job_ids[99], job_ids[100]);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 100);
+
+    runtime.run().await?;
+
+    assert_eq!(storage.dead_count().await?, 0);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
+    assert_eq!(storage.jobs_count().await?, 0);
+
+    let value: Option<i32> = redis_conn.get(duplicate_key).await?;
+    assert_eq!(value, Some(99));
+
+    Ok(())
+}
+
+#[tokio::test]
 pub async fn test_enqueue_list_unique_replace_deduplicates_within_batch() -> TestResult {
     let redis_pool = setup();
     let mut redis_conn = redis_pool.get().await?;
@@ -321,6 +368,53 @@ pub async fn test_enqueue_list_unique_replace_deduplicates_within_batch() -> Tes
 
     let value: Option<i32> = redis_conn.get(key).await?;
     assert_eq!(value, Some(2));
+
+    Ok(())
+}
+
+#[tokio::test]
+pub async fn test_enqueue_list_unique_replace_deduplicates_across_chunks() -> TestResult {
+    let redis_pool = setup();
+    let mut redis_conn = redis_pool.get().await?;
+    let ctx = WorkerState {
+        redis: redis_pool.clone(),
+    };
+    let storage = oxana::Storage::builder()
+        .namespace(random_string())
+        .build_from_pool(redis_pool.clone())?;
+    let runtime = storage
+        .runtime(ctx)
+        .queue::<QueueOne>()
+        .worker::<WorkerUniqueReplace, WorkerUniqueReplaceJob>()
+        .exit_when_processed(100);
+    let duplicate_key = random_string();
+
+    let jobs = (0..101)
+        .map(|idx| WorkerUniqueReplaceJob {
+            id: if idx == 100 { 99 } else { idx },
+            key: if idx >= 99 {
+                duplicate_key.clone()
+            } else {
+                random_string()
+            },
+            value: idx,
+        })
+        .collect::<Vec<_>>();
+
+    let job_ids = storage.enqueue_list(QueueOne, jobs).await?;
+
+    assert_eq!(job_ids.len(), 101);
+    assert_eq!(job_ids[99], job_ids[100]);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 100);
+
+    runtime.run().await?;
+
+    assert_eq!(storage.dead_count().await?, 0);
+    assert_eq!(storage.enqueued_count(QueueOne).await?, 0);
+    assert_eq!(storage.jobs_count().await?, 0);
+
+    let value: Option<i32> = redis_conn.get(duplicate_key).await?;
+    assert_eq!(value, Some(100));
 
     Ok(())
 }
