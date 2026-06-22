@@ -35,10 +35,15 @@ use crate::{
 
 const JOB_EXPIRE_TIME: i64 = 7 * 24 * 3600; // 7 days
 const SCAN_BATCH_SIZE: usize = 500;
+const ENQUEUE_LIST_CHUNK_SIZE: usize = 100;
 const QUEUE_LENGTH_SNAPSHOT_TTL_SECS: i64 = 120;
 
 fn unix_timestamp_secs_f64() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
+}
+
+fn enqueue_list_chunks(envelopes: &[JobEnvelope]) -> std::slice::Chunks<'_, JobEnvelope> {
+    envelopes.chunks(ENQUEUE_LIST_CHUNK_SIZE)
 }
 
 #[derive(Clone)]
@@ -358,56 +363,74 @@ impl StorageInternal {
         envelopes: Vec<JobEnvelope>,
         destination: JobDestination,
     ) -> Result<Vec<JobId>, OxanaError> {
-        let mut pipe = redis::pipe();
-        let mut has_writes = false;
         let mut job_ids = Vec::with_capacity(envelopes.len());
         let mut staged_unique_queues: HashMap<JobId, String> = HashMap::new();
 
-        for envelope in envelopes {
-            let job_id = envelope.id.clone();
+        for chunk in enqueue_list_chunks(&envelopes) {
+            let mut pipe = redis::pipe();
+            let mut has_writes = false;
 
-            let action = if envelope.meta.unique {
-                match staged_unique_queues.get(&envelope.id) {
-                    Some(existing_queue) => match envelope.meta.on_conflict.as_ref() {
-                        Some(JobConflictStrategy::Replace) => JobEnqueueAction::Replace {
-                            existing_queue: existing_queue.clone(),
-                        },
-                        Some(JobConflictStrategy::Skip) | None => JobEnqueueAction::Skip,
-                    },
-                    None => self.job_enqueue_action(redis, &envelope).await?,
-                }
-            } else {
-                JobEnqueueAction::Default
-            };
+            for envelope in chunk {
+                let job_id = envelope.id.clone();
+                let action = self
+                    .enqueue_list_action(redis, envelope, &staged_unique_queues)
+                    .await?;
 
-            match action {
-                JobEnqueueAction::Skip => {
-                    tracing::warn!("Unique job {} already exists, skipping", envelope.id);
-                }
-                JobEnqueueAction::Replace { existing_queue } => {
-                    tracing::warn!("Unique job {} already exists, replacing", envelope.id);
+                let wrote = match action {
+                    JobEnqueueAction::Skip => {
+                        tracing::warn!("Unique job {} already exists, skipping", envelope.id);
+                        false
+                    }
+                    JobEnqueueAction::Replace { existing_queue } => {
+                        tracing::warn!("Unique job {} already exists, replacing", envelope.id);
 
-                    self.append_replace(&mut pipe, &existing_queue, &envelope, destination)?;
-                    staged_unique_queues.insert(job_id.clone(), envelope.queue.clone());
-                    has_writes = true;
-                }
-                JobEnqueueAction::Default => {
-                    self.append_enqueue(&mut pipe, &envelope, destination)?;
+                        self.append_replace(&mut pipe, &existing_queue, envelope, destination)?;
+                        true
+                    }
+                    JobEnqueueAction::Default => {
+                        self.append_enqueue(&mut pipe, envelope, destination)?;
+                        true
+                    }
+                };
+
+                if wrote {
                     if envelope.meta.unique {
                         staged_unique_queues.insert(job_id.clone(), envelope.queue.clone());
                     }
                     has_writes = true;
                 }
+
+                job_ids.push(job_id);
             }
 
-            job_ids.push(job_id);
-        }
-
-        if has_writes {
-            let _: () = pipe.query_async(&mut *redis).await?;
+            if has_writes {
+                let _: () = pipe.query_async(&mut *redis).await?;
+            }
         }
 
         Ok(job_ids)
+    }
+
+    async fn enqueue_list_action(
+        &self,
+        redis: &mut deadpool_redis::Connection,
+        envelope: &JobEnvelope,
+        staged_unique_queues: &HashMap<JobId, String>,
+    ) -> Result<JobEnqueueAction, OxanaError> {
+        if !envelope.meta.unique {
+            return Ok(JobEnqueueAction::Default);
+        }
+
+        let Some(existing_queue) = staged_unique_queues.get(&envelope.id) else {
+            return self.job_enqueue_action(redis, envelope).await;
+        };
+
+        match envelope.meta.on_conflict.as_ref() {
+            Some(JobConflictStrategy::Replace) => Ok(JobEnqueueAction::Replace {
+                existing_queue: existing_queue.clone(),
+            }),
+            Some(JobConflictStrategy::Skip) | None => Ok(JobEnqueueAction::Skip),
+        }
     }
 
     fn append_enqueue(
@@ -2365,6 +2388,23 @@ mod tests {
         );
 
         Ok(latency_micros)
+    }
+
+    #[test]
+    fn enqueue_list_chunks_batches_by_one_hundred() -> TestResult {
+        let queue = random_string();
+        let envelopes = (0..(ENQUEUE_LIST_CHUNK_SIZE * 2 + 1))
+            .map(|_| JobEnvelope::new(queue.clone(), TestJob {}))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let chunk_sizes = enqueue_list_chunks(&envelopes)
+            .map(<[JobEnvelope]>::len)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ENQUEUE_LIST_CHUNK_SIZE, 100);
+        assert_eq!(chunk_sizes, vec![100, 100, 1]);
+
+        Ok(())
     }
 
     #[tokio::test]
