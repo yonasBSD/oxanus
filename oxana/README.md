@@ -20,6 +20,7 @@ Oxana focuses on simplicity and depth over breadth - one backend, done well.
 - **Retries** - automatic retry with configurable backoff
 - **Scheduled Jobs** - run jobs at specific times or after delays
 - **Cron Jobs** - periodic jobs using cron expressions
+- **Batch Processing** - process jobs together with size and timeout based batching
 - **Dynamic Queues** - create and manage queues at runtime
 - **Runtime Queue Controls** - pause queues and adjust dynamic concurrency without restarting workers
 - **Throttling** - rate-limit job processing per queue
@@ -34,7 +35,7 @@ Oxana focuses on simplicity and depth over breadth - one backend, done well.
 ## Quick Start
 
 ```bash
-cargo add oxana@2.0.0-rc.14 --features registry
+cargo add oxana@2.0.0 --features registry
 ```
 
 The `registry` feature (not enabled by default) powers `#[derive(oxana::Registry)]` and `runtime.register::<...>()` used below; without it, register queues and workers explicitly with `runtime.queue::<...>()` and `runtime.worker::<...>()`.

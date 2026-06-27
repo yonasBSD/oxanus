@@ -2,64 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.0.0-rc]
+## [2.0.0]
 
 **Breaking release.** See [MIGRATION.md](MIGRATION.md) for the 1.x -> 2.x upgrade guide.
 
-### Breaking Changes
+### Major Changes
 
 - Rename the project and crates from Oxanus to Oxana. Use `oxana`, `oxana-macros`, `oxana-web`, and `#[oxana(...)]` in manifests, imports, derive attributes, examples, and dashboard integrations.
-- Move enqueue-time metadata onto `#[derive(oxana::Job)]`. Job identity, conflict handling, resurrection, throttle cost, and on-demand exposure now belong to the job type; runtime registration maps job types to workers, and custom job hooks now resolve `Self` as the job type.
-- Replace the public `Config` setup path with a typed runtime API: keep `Storage` for enqueueing/monitoring, register workers and queues with `storage.runtime(ctx)`, run with `runtime.run()`, drain with `runtime.drain(queue)`, and inspect registrations with `runtime.catalog()`.
-- Route every worker through the batch-capable execution path. Manual worker implementations now provide `process` or `run_batch` (both have defaults; implementing neither compiles but panics at runtime on the first job), while derive users can keep writing `process` for single-job workers or opt into `process_batch`.
-- Drop the `Serialize` supertrait from `Queue`. Static queues no longer need serializable fields; manual dynamic queue implementations must now implement `key()` themselves (the default panics for dynamic queues).
-- Rename the `QueueKind::Dynamic` field `sleep_period` to `discovery_interval`. Code that pattern-matches or constructs `QueueKind::Dynamic` must be updated.
-- Add `'static` bounds to `Storage::enqueue`/`enqueue_in`/`enqueue_at` job parameters and `Job::name()`.
-- Add a required `legacy_names` field to `WorkerConfig` for manual worker registrations (the derive and `register_worker` fill it with the worker's type name).
-- Own job values during execution instead of borrowing them, so job payload types no longer need to implement `Sync`.
-- Simplify structured job progress to cursor/total values. `JobProgress` no longer exposes a separate `processed` field, and `update_progress` tuple helpers now use `(cursor, total)` or `(cursor, total, note)`.
-- Remove unused convenience accessors: `JobMeta::{created_at_millis, scheduled_at_millis, scheduled_at_secs, latency_secs, started_at_secs, started_at_millis}`, `JobMetricsTotals::execution_seconds`, `JobProgressIterator::current_index`, and the never-raised `OxanaError::JobPanicked` variant.
-- Mark `OxanaError` as `#[non_exhaustive]`. Downstream `match` expressions on the error enum must add a wildcard arm; future variant additions will no longer be breaking.
+- Replace the `Config`-first setup flow with a typed runtime API. `Storage` now focuses on enqueueing, scheduling, metrics, and monitoring; `storage.runtime(ctx)` handles queue and worker registration, runtime settings, `run()`, `drain(queue)`, and `catalog()`.
+- Move persisted job identity and enqueue-time metadata onto the job type. Runtime registrations now map job types to workers, while unique IDs, conflict handling, resurrection, retry-state resume, throttle cost, and on-demand exposure are defined by `Job`.
+- Keep a migration path for existing Redis data by registering legacy worker-name aliases, so 2.x runtimes can consume queued, scheduled, retry, and dead jobs written by 1.x workers.
+- Route workers through a batch-capable execution path. Workers now receive owned job values, manual implementations provide `process` or `run_batch`, and job payloads no longer need to implement `Sync`.
+- Simplify queue definitions. Static queues no longer need `Serialize`, dynamic queues use an explicit `discovery_interval`, and manual dynamic queues must provide their own `key()`.
+- Simplify structured progress to cursor/total state. `JobProgress` no longer exposes a separate `processed` field, and progress helpers use `(cursor, total)` or `(cursor, total, note)`.
+- Remove deprecated or unused public surface, including legacy `JobMeta` timestamp helpers, `JobMetricsTotals::execution_seconds`, `JobProgressIterator::current_index`, and the never-raised `OxanaError::JobPanicked` variant. `OxanaError` is now `#[non_exhaustive]`.
 
-### Added
+### New Features
 
-- Add a root MIT license file and README license section.
-- Add batch workers with `#[oxana(batch_size = ..., batch_timeout_ms = ...)]`, `process_batch`, `BatchItem`, and `WorkerBatchConfig` for high-throughput workloads that can process jobs together.
-- Add on-demand jobs: annotate a job with `#[oxana(on_demand)]` to expose it in the web dashboard with editable JSON arguments and type-aware argument templates.
-- Add worker execution metrics, including per-minute success, failure, panic, execution-time, and histogram data through `Storage::job_metrics`, `Storage::job_metrics_for`, and the new `/metrics` dashboard pages.
-- Add queue length history, per-queue processing rates, growth rates, effective drain rates, and ETA estimates to the stats APIs and dashboard.
-- Add `REDIS_STATS_URL`, `build_from_redis_urls`, and `build_from_pools` so counters and metrics can use a separate Redis instance from the primary job store.
-- Add dashboard actions for enqueueing cron jobs immediately and wiping the dead queue.
-- Add structured job progress state with `ctx.state.update_progress(...)`, `ctx.state.progress()`, and dashboard progress bars for long-running jobs.
-- Add `ctx.state.iter_with_progress(...)` and `JobProgressIterator` for resumable iterator-style jobs that should restart from the saved cursor and advance progress as items complete.
-- Show scalar job arguments as compact dashboard pills while preserving raw JSON for complex arguments.
-- Add runtime queue configuration storage for queue state and dynamic concurrency overrides.
-- Add dynamic queue concurrency through `QueueConfig::dynamic_concurrency(...)` and `#[oxana(concurrency = Dynamic(...))]`.
-- Add `Storage::set_queue_concurrency`, `Storage::set_queue_state`, `Storage::pause_queue`, `Storage::unpause_queue`, and `Storage::reset_queue_config` for changing queue runtime behavior without restarting workers.
-- Add dashboard controls for pausing queues and changing dynamic queue concurrency from queue detail pages.
-- Add dynamic concurrency examples, including seeded dynamic tenant queues in the web dashboard example.
-- Add runtime tuning setters for worker heartbeats, resurrection/failover thresholds, retry/schedule/cron polling, dequeue/dispatcher backoff, shutdown timeout, and Redis response timeout.
-- Add a configurable dynamic queue discovery interval through `QueueConfig::discovery_interval(...)` and `#[oxana(discovery_interval_ms = ...)]`.
-
-### Changed
-
-- Register temporary legacy worker-name aliases so 2.x runtimes can consume 1.x queued, scheduled, retry, and dead jobs whose envelopes still use worker type names.
-- Make dashboard queue and metrics views more operationally useful: queue length charts now live with queue stats, tooltips use readable worker labels, zero-value tooltip rows are hidden, and unknown ETAs sort after known drain times.
-- Add a 24-hour window to job metrics views, retain metrics long enough to back it, and downsample long-window chart payloads.
-- Show progress-aware job state and ETA estimates in the dashboard while preserving cursor-only resumable state as raw job state.
-- Reduce Redis pressure by replacing `KEYS` with cursor-based `SCAN`, batching result counter writes, and snapshotting active queue lengths during worker refreshes.
-- Improve on-demand registration so the dashboard can prefill arguments, keep job hooks intact, and choose a sensible default queue.
-- Refresh examples, package metadata, CI paths, documentation references, and dependency versions for the Oxana rename and 2.0 release candidate.
-- Apply runtime queue state and dynamic concurrency changes while dispatchers are running.
-- Clear persisted concurrency overrides when a dynamic queue is set back to its effective default.
-- Treat a dynamic child queue's effective concurrency default as the inherited base queue runtime concurrency.
-- Show dashboard concurrency overrides with the default value struck through.
-
-### Fixed
-
-- Avoid persisting runtime queue config when a queue is only using its default configuration.
-- Clear stale retry and schedule membership when replacing a unique job so the old retry attempt cannot run after the replacement resets the retry counter.
-- Keep worker heartbeats active while graceful shutdown drains in-flight jobs, preventing another process from treating those jobs as abandoned.
+- Add batch workers with `#[oxana(batch_size = ..., batch_timeout_ms = ...)]`, derived `process_batch`, `BatchItem`, and `WorkerBatchConfig`.
+- Add `Storage::enqueue_list` for enqueueing multiple jobs to the same queue in one call while preserving unique-job conflict behavior.
+- Add on-demand dashboard jobs with `#[oxana(on_demand)]`, editable JSON argument templates, and manual enqueueing from the web UI.
+- Add job execution metrics through `Storage::job_metrics`, `Storage::job_metrics_for`, execution-time histograms, and new `/metrics` dashboard pages.
+- Add queue length history, per-queue processing rates, growth rates, effective drain rates, ETA estimates, and sortable queue/metrics dashboard tables.
+- Add 24-hour metrics windows with retention and chart downsampling for longer dashboard views.
+- Add structured progress APIs with `ctx.state.update_progress(...)`, `ctx.state.progress()`, `ctx.state.iter_with_progress(...)`, `JobProgressIterator`, and progress bars/ETAs in the dashboard.
+- Add runtime queue controls with persisted queue state and dynamic concurrency overrides: `QueueConfig::dynamic_concurrency(...)`, `Storage::set_queue_concurrency`, `Storage::set_queue_state`, `pause_queue`, `unpause_queue`, and `reset_queue_config`, plus dashboard controls for supported queues.
+- Add bulk operational actions for recovering jobs: retry all pending retries, revive all dead jobs, wipe the dead queue, enqueue cron jobs immediately, and re-enqueue jobs from dashboard job lists.
+- Add runtime tuning setters for worker heartbeat, resurrection/failover thresholds, Redis failure tolerance, retry/schedule/cron polling, dequeue and dispatcher backoff, throttled queue fallback wait, and shutdown timeout.
+- Add storage builder conveniences, including `Storage::from_env`, `Storage::from_url`, `build_from_redis_urls`, `build_from_pools`, and `REDIS_STATS_URL` for storing counters and metrics separately from the primary job store.
+- Improve Redis-side scalability by using cursor-based scans for queue discovery, batching result counter writes, and snapshotting active queue lengths during worker refreshes.
 
 ## [1.1.1]
 
