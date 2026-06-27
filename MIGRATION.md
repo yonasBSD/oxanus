@@ -1,26 +1,26 @@
-# Migration Guide: 1.x -> 2.x
+# Migration Guide: Oxanus 1.1.1 -> Oxana 2.0.0
 
-Oxana 2.x makes `Storage` a focused enqueueing and monitoring handle, and moves worker setup into a typed runtime built with `storage.runtime(ctx)`. It also changes persisted job identity from worker type names to job type names.
+Oxana 2.0 makes `Storage` a focused enqueueing and monitoring handle, and moves worker setup into a typed runtime built with `storage.runtime(ctx)`. It also changes persisted job identity from worker type names to job type names.
 
-This guide is written for applications already using the 1.x job/worker split.
+This guide is written for applications on Oxanus 1.1.1, the last 1.x release.
 
 ## Before You Upgrade
 
-Plan the Redis migration first. In 1.x, queued job envelopes were registered by `Job::worker_name()`, usually the worker type name. In 2.x, new envelopes are registered by `Job::name()`, which defaults to the job type name.
+Plan the Redis migration first. In Oxanus 1.1.1, queued job envelopes were registered by `Job::worker_name()`, usually the worker type name. In Oxana 2.0, new envelopes are registered by `Job::name()`, which defaults to the job type name.
 
-For consumer compatibility, the 2.x runtime also registers each worker's type name as a temporary legacy alias for its job type. That lets existing enqueued, scheduled, retry, and dead jobs named `FooWorker` deserialize into `FooJob` and run through `FooWorker` after the upgrade.
+For consumer compatibility, the 2.0 runtime also registers each worker's type name as a temporary legacy alias for its job type. That lets existing enqueued, scheduled, retry, and dead jobs named `FooWorker` deserialize into `FooJob` and run through `FooWorker` after the upgrade.
 
-This alias is read-side only. New jobs are still written with job-type identity, and unique job IDs are still prefixed with the new job type name. A unique 1.x job named `FooWorker/id` and a unique 2.x job named `FooJob/id` can therefore coexist during the migration window.
+This alias is read-side only. New jobs are still written with job-type identity, and unique job IDs are still prefixed with the new job type name. A unique 1.1.1 job named `FooWorker/id` and a unique 2.0 job named `FooJob/id` can therefore coexist during the migration window.
 
 Recommended options:
 
-- Stop 1.x producers and workers before starting 2.x if duplicate unique jobs would be harmful.
-- Let the 2.x runtime consume old worker-named jobs through the legacy aliases, or drain queues first if you want a cleaner cutover.
-- Use a new Oxana namespace or Redis database for the 2.x deployment.
+- Stop 1.1.1 producers and workers before starting 2.0 if duplicate unique jobs would be harmful.
+- Let the 2.0 runtime consume old worker-named jobs through the legacy aliases, or drain queues first if you want a cleaner cutover.
+- Use a new Oxana namespace or Redis database for the 2.0 deployment.
 
 ## 1. Update Crate Names And Imports
 
-If your 1.x app still uses the old Oxanus crate names or attributes, rename them to Oxana:
+Oxanus 1.1.1 used the `oxanus`, `oxanus-macros`, and `oxanus-web` crates. Rename them to Oxana:
 
 ```toml
 # Before
@@ -42,11 +42,17 @@ Update Rust paths and macro attributes the same way:
 #[oxana(key = "emails")]
 ```
 
+Also rename public types and modules:
+
+- `oxanus::OxanusError` -> `oxana::OxanaError`
+- `oxanus_web::OxanusWebState` -> `oxana_web::OxanaWebState`
+- `oxanus::...` imports and paths -> `oxana::...`
+
 ## 2. Replace Config With RuntimeBuilder
 
-In 1.x, `Config` carried worker registrations, queue registrations, shutdown settings, the global worker error type, and a storage handle.
+In Oxanus 1.1.1, `Config` carried worker registrations, queue registrations, shutdown settings, the global worker error type, and a storage handle.
 
-In 2.x:
+In Oxana 2.0:
 
 - `Storage` handles enqueueing, scheduling, metrics, and queue monitoring.
 - `RuntimeBuilder<C>` handles context, worker/queue registration, runtime settings, running, draining, and catalogs.
@@ -55,18 +61,18 @@ In 2.x:
 Before:
 
 ```rust
-#[derive(oxana::Registry)]
-struct ComponentRegistry(oxana::ComponentRegistry<AppContext, AppError>);
+#[derive(oxanus::Registry)]
+struct ComponentRegistry(oxanus::ComponentRegistry<AppContext, AppError>);
 
-let ctx = oxana::ContextValue::new(AppContext { db, mailer });
-let storage = oxana::Storage::builder().build_from_env()?;
+let ctx = oxanus::ContextValue::new(AppContext { db, mailer });
+let storage = oxanus::Storage::builder().build_from_env()?;
 
 let config = ComponentRegistry::build_config(&storage)
     .with_graceful_shutdown(tokio::signal::ctrl_c())
     .exit_when_processed(1);
 
 storage.enqueue(EmailQueue, SendEmailJob { user_id }).await?;
-oxana::run(config, ctx).await?;
+oxanus::run(config, ctx).await?;
 ```
 
 After:
@@ -91,7 +97,7 @@ Manual registration moves the same way:
 
 ```rust
 // Before
-let config = oxana::Config::<AppContext, AppError>::new(&storage)
+let config = oxanus::Config::<AppContext, AppError>::new(&storage)
     .register_queue::<EmailQueue>()
     .register_worker::<SendEmailWorker, SendEmailJob>();
 
@@ -102,11 +108,13 @@ let runtime = storage
     .worker::<SendEmailWorker, SendEmailJob>();
 ```
 
+If you construct `WorkerConfig` manually, update it for the 2.0 registry shape: the `name` should be the job identity, `legacy_names` should include any old worker type names you want the runtime to consume from Redis, and the config now also carries `batch_factory`, `batch_config`, and `on_demand`. The exported helpers `job_factory`, `job_batch_factory`, and `job_envelope_factory` cover the common cases.
+
 ## 3. Move Runtime Settings
 
 Configuration methods that used to live on `Config` now live on the runtime builder:
 
-| 1.x | 2.x |
+| Oxanus 1.1.1 | Oxana 2.0 |
 | --- | --- |
 | `with_graceful_shutdown(fut)` | `shutdown_on(fut)` |
 | `with_graceful_shutdown(tokio::signal::ctrl_c())` | `shutdown_on_ctrl_c()` |
@@ -114,7 +122,7 @@ Configuration methods that used to live on `Config` now live on the runtime buil
 | `exit_when_processed(n)` | `exit_when_processed(n)` |
 | `has_registered_queue` / `has_registered_worker` / `has_registered_worker_type` / `has_registered_cron_worker` / `has_registered_cron_worker_type` | inspect `runtime.catalog()` (`queues`, `workers`, `cron_workers`) |
 
-2.x also exposes runtime tuning on the same builder:
+Oxana 2.0 also exposes runtime tuning on the same builder:
 
 ```rust
 let runtime = storage
@@ -155,8 +163,8 @@ The component registry is now typed only by app context:
 
 ```rust
 // Before
-#[derive(oxana::Registry)]
-struct ComponentRegistry(oxana::ComponentRegistry<AppContext, AppError>);
+#[derive(oxanus::Registry)]
+struct ComponentRegistry(oxanus::ComponentRegistry<AppContext, AppError>);
 
 // After
 #[derive(oxana::Registry)]
@@ -183,31 +191,37 @@ impl SendEmailWorker {
 
 Use `#[oxana(error = AppError)]` only when you need the generated `Worker` impl to expose that concrete error type.
 
-## 5. Remove Job-To-Worker Binding From Jobs
+## 5. Move Job Metadata From Workers To Jobs
 
-Jobs no longer name their worker. The runtime maps each job type to a worker through registration.
-The worker derive still infers `SendEmailWorker` -> `SendEmailJob`; keep using
-`#[oxana(job = CustomJob)]` on the worker when the convention does not match.
+In Oxanus 1.1.1, `#[derive(oxanus::Worker)]` generated both the worker impl and the job impl. Enqueue-time metadata such as `unique_id`, `on_conflict`, `resurrect`, and `throttle_cost` lived on the worker derive.
+
+In Oxana 2.0, job payloads derive or implement `oxana::Job` directly. Move enqueue-time metadata to the job type. The runtime maps each job type to a worker through registration. The worker derive still infers `SendEmailWorker` -> `SendEmailJob`; keep using `#[oxana(job = CustomJob)]` on the worker when the convention does not match.
 
 Before:
 
 ```rust
-#[derive(Debug, serde::Serialize, serde::Deserialize, oxana::Job)]
-#[oxana(worker = SendEmailWorker)]
-#[oxana(unique_id = "send_email:{user_id}")]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SendEmailJob {
     user_id: i64,
 }
+
+#[derive(oxanus::Worker)]
+#[oxanus(unique_id = "send_email:{user_id}", on_conflict = Replace)]
+struct SendEmailWorker;
 ```
 
 After:
 
 ```rust
 #[derive(Debug, serde::Serialize, serde::Deserialize, oxana::Job)]
-#[oxana(unique_id = "send_email:{user_id}")]
+#[oxana(unique_id = "send_email:{user_id}", on_conflict = Replace)]
 struct SendEmailJob {
     user_id: i64,
 }
+
+#[derive(oxana::Worker)]
+#[oxana(context = AppContext)]
+struct SendEmailWorker;
 
 let runtime = storage
     .runtime(ctx)
@@ -218,7 +232,7 @@ Manual `Job` implementations should remove `worker_name()`:
 
 ```rust
 // Before
-impl oxana::Job for SendEmailJob {
+impl oxanus::Job for SendEmailJob {
     fn worker_name() -> &'static str {
         std::any::type_name::<SendEmailWorker>()
     }
@@ -236,13 +250,16 @@ impl oxana::Job for SendEmailJob {
 }
 ```
 
-Job attributes remain enqueue-time metadata:
+Move these 1.1.1 worker attributes to `#[derive(oxana::Job)]`, using the new `oxana` attribute spelling:
 
 - `#[oxana(unique_id = "...")]`
 - `#[oxana(on_conflict = Skip)]` or `#[oxana(on_conflict = Replace)]`
 - `#[oxana(resurrect = false)]`
-- `#[oxana(resume = false)]`
 - `#[oxana(throttle_cost = 2)]`
+
+Oxana 2.0 also adds these job attributes:
+
+- `#[oxana(resume = false)]`
 - `#[oxana(on_demand)]`
 
 Worker attributes remain execution-time metadata:
@@ -258,7 +275,7 @@ Worker attributes remain execution-time metadata:
 
 ## 6. Update Worker Process Signatures
 
-2.x owns job values during execution. If your handler still borrows the job, take it by value instead.
+Oxana 2.0 owns job values during execution. If your handler still borrows the job, take it by value instead.
 
 ```rust
 // Before
@@ -266,7 +283,7 @@ impl SendEmailWorker {
     async fn process(
         &self,
         _job: &SendEmailJob,
-        _ctx: &oxana::JobContext,
+        _ctx: &oxanus::JobContext,
     ) -> Result<(), AppError> {
         Ok(())
     }
@@ -331,8 +348,8 @@ Static queues no longer need `serde::Serialize`:
 
 ```rust
 // Before
-#[derive(serde::Serialize, oxana::Queue)]
-#[oxana(key = "emails", concurrency = 4)]
+#[derive(serde::Serialize, oxanus::Queue)]
+#[oxanus(key = "emails", concurrency = 4)]
 struct EmailQueue;
 
 // After
@@ -365,6 +382,8 @@ impl oxana::Queue for TenantQueue {
 }
 ```
 
+If you construct `QueueConfig` manually, update `concurrency: usize` to `QueueConcurrency::Fixed(n)` or use `QueueConfig::concurrency(n)`. Use `QueueConfig::dynamic_concurrency(n)` only for queues whose concurrency can be changed at runtime. Code that pattern-matches `QueueKind::Dynamic { sleep_period, .. }` should use `QueueKind::Dynamic { discovery_interval, .. }`.
+
 Manual static queues can use the default `key()` as long as `to_config()` returns a static queue config.
 
 ## 8. Update Drain, Catalog, And Web Dashboard Setup
@@ -373,7 +392,7 @@ Drain now runs through a runtime:
 
 ```rust
 // Before
-let stats = oxana::drain(&config, ctx, EmailQueue).await?;
+let stats = oxanus::drain(&config, ctx, EmailQueue).await?;
 
 // After
 let stats = runtime.drain(EmailQueue).await?;
@@ -392,6 +411,22 @@ let catalog = runtime.catalog();
 For `oxana-web`, build the catalog before consuming the runtime with `run()`:
 
 ```rust
+// Before
+let config = ComponentRegistry::build_config(&storage)
+    .with_graceful_shutdown(tokio::signal::ctrl_c());
+
+let oxanus_state = oxanus_web::OxanusWebState::new(
+    config.storage.clone(),
+    config.catalog(),
+    "/oxanus".to_string(),
+);
+
+let oxanus_router = oxanus_web::router(oxanus_state);
+let app = your_app_router().nest("/oxanus", oxanus_router);
+```
+
+```rust
+// After
 let storage = oxana::Storage::from_env()?;
 let runtime = storage
     .runtime(ctx)
@@ -415,7 +450,7 @@ tokio::spawn(async move {
 });
 ```
 
-Metrics and dashboard labels are keyed by job identity in 2.x. If you used worker type names to query metrics, update those callers to use the registered job name.
+Metrics and dashboard labels are keyed by job identity in Oxana 2.0. If you used worker type names to query metrics, update those callers to use the registered job name.
 
 ## 9. Update Progress State
 
@@ -438,7 +473,7 @@ The existing builder still works:
 let storage = oxana::Storage::builder().build_from_env()?;
 ```
 
-2.x also adds shorter constructors:
+Oxana 2.0 also adds shorter constructors:
 
 ```rust
 let storage = oxana::Storage::from_env()?;
@@ -449,13 +484,17 @@ let storage = oxana::Storage::from_url("redis://127.0.0.1/0")?;
 
 ## Checklist
 
-- Let the 2.x runtime consume old worker-named Redis jobs through legacy aliases, or drain/clear/re-enqueue them for a cleaner cutover.
-- Avoid overlapping 1.x and 2.x producers for unique jobs unless duplicate unique IDs are acceptable during the migration window.
+- Let the Oxana 2.0 runtime consume old worker-named Redis jobs through legacy aliases, or drain/clear/re-enqueue them for a cleaner cutover.
+- Avoid overlapping Oxanus 1.1.1 and Oxana 2.0 producers for unique jobs unless duplicate unique IDs are acceptable during the migration window.
 - Rename any remaining Oxanus crate paths, imports, and macro attributes to Oxana.
-- Replace `ContextValue::new(ctx)`, `Config`, and `oxana::run(config, ctx)` with `storage.runtime(ctx)` and `runtime.run()`.
+- Replace `ContextValue::new(ctx)`, `Config`, and `oxanus::run(config, ctx)` with `storage.runtime(ctx)` and `runtime.run()`.
 - Change `ComponentRegistry<AppContext, AppError>` to `ComponentRegistry<AppContext>`.
 - Move queue and worker registration to the runtime builder.
-- Remove `#[oxana(worker = ...)]` and manual `Job::worker_name()` implementations.
+- Update any manually constructed `WorkerConfig` and `QueueConfig` values to the 2.0 field shapes.
+- Add `#[derive(oxana::Job)]` or a manual `oxana::Job` impl for every job payload.
+- Move 1.1.1 worker-level `unique_id`, `on_conflict`, `resurrect`, and `throttle_cost` attributes to the job type.
+- Remove manual `Job::worker_name()` implementations.
+- Fix any new `'static` bound errors on enqueued or registered job payload types.
 - Ensure worker handlers take owned job values.
 - Remove `Serialize` derives from static queues when they are no longer needed.
 - Move drain, catalog, and web dashboard integration to the runtime API.
